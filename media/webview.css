@@ -1,0 +1,396 @@
+:root {
+  --gap: 6px;
+  --radius: 6px;
+}
+
+body {
+  padding: 4px 0;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+/* ---------- sekce ---------- */
+
+.section > .ghdr {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+  font-weight: 600;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.ghdr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius);
+}
+.ghdr:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  font-size: 14px;
+  opacity: 0.55;
+  flex: none;
+}
+
+.gbody {
+  display: flex;
+  flex-direction: column;
+  padding-left: 12px;
+}
+.gbody[hidden] {
+  display: none;
+}
+
+.lbl {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* textový sloupec: název + popis */
+.txt {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  align-items: baseline;
+}
+.meta {
+  margin-left: auto;
+  opacity: 0.6;
+  font-size: 0.9em;
+  flex: none;
+}
+
+/* ---------- řádky ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+}
+.row.file,
+.row.clickable {
+  cursor: pointer;
+}
+.row.file:hover,
+.row.clickable:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.row .desc {
+  opacity: 0.55;
+  font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.row.missing {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* popelnice na hover (memory fakty + plány) */
+.row .del {
+  display: none;
+  margin-left: auto;
+  align-self: center;
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+.row:hover .del {
+  display: inline-flex;
+}
+.row .del:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+  opacity: 1;
+}
+
+.ico {
+  flex: none;
+  width: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ico.codicon {
+  font-size: 15px;
+}
+
+/* stav úkolů (barva codicon glyphu přes currentColor) */
+.st-done {
+  color: var(--vscode-charts-green, #89d185);
+}
+.st-prog {
+  color: var(--vscode-charts-yellow, #e2c08d);
+}
+.st-pend {
+  opacity: 0.6;
+}
+
+/* completed úkol — přeškrtnutý a ztlumený text (Progress i History) */
+.row.t-completed .lbl {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+/* Progress — kroužky (obě skiny) */
+.progress-list .ico {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 12px;
+  /* přebij codicon `display:inline-block` (vyšší specificita) → vycentruj glyph */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.progress-list .ico.codicon {
+  font-size: 13px;
+}
+.progress-list .row.t-completed .ico {
+  background: var(--vscode-charts-green, #89d185);
+  color: var(--vscode-editor-background, #1e1e1e);
+}
+.progress-list .row.t-in_progress .ico {
+  color: var(--vscode-charts-yellow, #e2c08d);
+}
+.progress-list .row.t-pending .ico {
+  border: 1px solid var(--vscode-descriptionForeground, #888);
+  opacity: 0.7;
+}
+.progress-list .row.t-pending .ico::before {
+  /* skryj codicon kroužek — pending řešíme prázdným kroužkem / číslem (cards) */
+  content: '' !important;
+}
+
+/* akce u session */
+.actions {
+  display: none;
+  gap: 2px;
+  flex: none;
+}
+.ghdr:hover .actions {
+  display: inline-flex;
+}
+.actions button {
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+/* ikona menší než text řádku → hover nezvýší výšku řádku (žádný skok) */
+.actions .codicon {
+  font-size: 14px;
+  line-height: 1;
+}
+.actions button:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.empty {
+  padding: 4px 8px;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.empty-hint {
+  opacity: 0.5;
+  font-size: 0.9em;
+  font-style: italic;
+  padding: 6px 4px;
+}
+
+/* context window bar (Usage) */
+.ctxbar {
+  width: 100%;
+  height: 6px;
+  margin: 2px 4px 8px;
+  border: none;
+  border-radius: 3px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.ctxbar::-webkit-progress-bar {
+  background: rgba(127, 127, 127, 0.22);
+  border-radius: 3px;
+}
+.ctxbar::-webkit-progress-value {
+  background: var(--vscode-charts-blue, #4daafc);
+  border-radius: 3px;
+}
+
+/* responsive: v širokém kontejneru (dolní panel) sekce jako dlaždice, ne sloupec.
+   align-items: stretch (default) → karty v řádku jsou stejně vysoké, vyplní box. */
+@media (min-width: 680px) {
+  #root {
+    display: flex;
+    flex-flow: row wrap;
+    column-gap: 14px;
+    row-gap: 14px;
+    align-items: stretch;
+  }
+  #root > .section {
+    flex: 1 1 260px;
+    box-sizing: border-box;
+    margin: 0;
+    /* umožni zmenšení pod šířku obsahu → text se zkrátí (ellipsis), karta neroste na hover */
+    min-width: 0;
+  }
+}
+
+/* ============ SKIN: cards (cowork styl) ============ */
+
+body.skin-cards #root {
+  gap: 12px;
+  padding: 10px;
+}
+body.skin-cards .section {
+  background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.035));
+  border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.06));
+  border-radius: 12px;
+  padding: 10px 14px 12px;
+}
+
+/* hlavička sekce — Title Case, bold, chevron vpravo */
+body.skin-cards .section > .ghdr {
+  text-transform: none;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+  opacity: 1;
+  padding: 2px 0 8px 0;
+  cursor: pointer;
+}
+body.skin-cards .section > .ghdr:hover {
+  background: transparent;
+}
+body.skin-cards .section > .ghdr .lbl {
+  margin-right: auto;
+}
+body.skin-cards .section > .ghdr .meta {
+  margin-left: 0;
+}
+body.skin-cards .section > .ghdr .caret {
+  order: 2;
+  margin-left: 8px;
+  opacity: 0.5;
+}
+body.skin-cards .section > .gbody {
+  padding-left: 0;
+}
+/* vnořený obsah zarovnat pod ikonu rodiče (caret 16 + gap 9), ať soubory nevyčuhují vlevo */
+body.skin-cards .gbody {
+  padding-left: 25px;
+}
+
+/* řádky vzdušnější, text se zalamuje */
+body.skin-cards .row {
+  padding: 6px 4px;
+  gap: 9px;
+  align-items: flex-start;
+}
+body.skin-cards .ghdr {
+  padding: 7px 4px;
+  gap: 9px;
+}
+body.skin-cards .row .lbl {
+  white-space: normal;
+  line-height: 1.35;
+}
+/* jednotná šířka ikon → zarovnané sloupce (i bez rámečku, např. MCP tooly) */
+body.skin-cards .ico {
+  width: 24px;
+}
+/* název nad popisem, oba na celý řádek */
+body.skin-cards .txt {
+  flex-direction: column;
+  gap: 1px;
+  align-items: stretch;
+}
+body.skin-cards .txt .desc {
+  white-space: normal;
+}
+/* vnořené skupiny (history) — jemné odsazení, bez boxů */
+body.skin-cards .gbody .group > .ghdr {
+  font-size: 13px;
+}
+
+/* Progress (cards) — pending dostane pořadové číslo v kroužku */
+body.skin-cards .progress-list {
+  counter-reset: step;
+}
+body.skin-cards .progress-list .row.task {
+  counter-increment: step;
+}
+body.skin-cards .progress-list .ico {
+  width: 24px;
+  height: 24px;
+}
+body.skin-cards .progress-list .row.t-pending .ico::before {
+  content: counter(step) !important;
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+/* ikony v malém rámečku (jako cowork) — soubory i kategorie; status fajfky/hodiny ne */
+body.skin-cards .row.file .ico,
+body.skin-cards .ghdr .ico.codicon:not(.st-done):not(.st-prog) {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ============ SKIN: compact ============ */
+
+body.skin-compact #root {
+  gap: 2px;
+}
+body.skin-compact .row,
+body.skin-compact .ghdr {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}

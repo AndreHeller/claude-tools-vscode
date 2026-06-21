@@ -1,0 +1,154 @@
+{
+  "name": "claude-tools",
+  "displayName": "Claude Tools",
+  "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudePanel",
+          "title": "Claude Tools",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudePanel": [
+        {
+          "id": "claudeProgress",
+          "name": "To Do Progress",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudeHistory",
+          "name": "To Do History",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudeSessionTools",
+          "name": "Tools",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudeUsage",
+          "name": "Usage",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudeContext",
+          "name": "Instructions",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudePlans",
+          "name": "Plans",
+          "visibility": "hidden",
+          "when": "claudeTools.mode == 'tree'"
+        },
+        {
+          "id": "claudeWebview",
+          "name": "Claude Tools",
+          "type": "webview",
+          "when": "claudeTools.mode == 'webview'"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Tools",
+      "properties": {
+        "claudeTools.appearance": {
+          "type": "string",
+          "enum": ["tree", "compact", "cards"],
+          "enumDescriptions": [
+            "Native tree (VS Code TreeView)",
+            "Webview — compact list",
+            "Webview — cards (cowork style)"
+          ],
+          "default": "tree",
+          "description": "Claude Tools panel appearance. 'tree' = native tree; 'compact'/'cards' = webview skins."
+        },
+        "claudeTools.contextWindow": {
+          "type": "string",
+          "enum": ["auto", "200000", "1000000"],
+          "enumDescriptions": [
+            "Auto-detect from observed usage",
+            "200K (standard)",
+            "1M (extended context)"
+          ],
+          "default": "auto",
+          "description": "Context window size for the Usage %. The 1M flag can't be read from the session reliably — set it here if Auto guesses wrong."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "claudePanel.refresh",
+        "title": "Claude Tools: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudePanel.openFile",
+        "title": "Claude Tools: Open File"
+      },
+      {
+        "command": "claudePanel.deleteFile",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudePanel.openTranscript",
+        "title": "Open raw transcript (.jsonl)",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "claudePanel.openInClaude",
+        "title": "Open session in Claude Code",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudePanel.openSkill",
+        "title": "Open SKILL.md",
+        "icon": "$(go-to-file)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudePanel.refresh",
+          "when": "view == claudeProgress || view == claudeHistory || view == claudeContext || view == claudeSessionTools || view == claudeUsage || view == claudePlans || view == claudeWebview",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudePanel.deleteFile",
+          "when": "viewItem == deletableFile",
+          "group": "inline"
+        },
+        {
+          "command": "claudePanel.openInClaude",
+          "when": "viewItem == sessionNode",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudePanel.openTranscript",
+          "when": "viewItem == sessionNode",
+          "group": "inline@2"
+        }
+      ]
+    }
+  }
+}
