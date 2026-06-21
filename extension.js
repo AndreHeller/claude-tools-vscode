@@ -839,7 +839,7 @@ function placeholder(text) {
 // ---------- webview (skiny compact / cards) ----------
 
 function appearance() {
-  return vscode.workspace.getConfiguration('claudeTools').get('appearance', 'tree');
+  return vscode.workspace.getConfiguration('claudeTools').get('appearance', 'cards');
 }
 
 // Plochý JSON model pro webview — staví ze stejných read funkcí jako TreeView.

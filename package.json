@@ -80,7 +80,7 @@
             "Webview — compact list",
             "Webview — cards (cowork style)"
           ],
-          "default": "tree",
+          "default": "cards",
           "description": "Claude Tools panel appearance. 'tree' = native tree; 'compact'/'cards' = webview skins."
         },
         "claudeTools.contextWindow": {
