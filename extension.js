@@ -207,9 +207,20 @@ function getProjectSessions(projectDir) {
 // Skill: tool_use name 'Skill', input.skill = 'plugin:skill'.
 // MCP:   tool_use name 'mcp__<server>__<tool>'.
 // Notable vestavěné Claude nástroje, které stojí za zobrazení (ne každý Read/Bash).
-const NOTABLE_BUILTIN = new Set(['WebSearch', 'WebFetch', 'Task', 'Agent']);
+const NOTABLE_BUILTIN = new Set(['WebSearch', 'WebFetch']);
 // Ikona (codicon) per built-in nástroj — sdíleno principem v tree i webview.
-const BUILTIN_ICON = { WebSearch: 'search', WebFetch: 'globe', Task: 'rocket', Agent: 'rocket' };
+const BUILTIN_ICON = { WebSearch: 'search', WebFetch: 'globe' };
+
+// Volání subagenta jde přes tool 'Task'/'Agent' s input.subagent_type.
+const AGENT_TOOLS = new Set(['Task', 'Agent']);
+// Vestavěné subagent_type (bez plugin namespace). Cokoliv mimo = vlastní/projektový agent.
+const BUILTIN_AGENTS = new Set(['claude', 'general-purpose', 'Explore', 'Plan', 'statusline-setup']);
+// Kind agenta z jeho subagent_type: plugin (má namespace `:`), built-in, nebo custom.
+function agentKind(type) {
+  if (type.includes(':')) return 'plugin';
+  if (BUILTIN_AGENTS.has(type)) return 'builtin';
+  return 'custom';
+}
 
 // Built-in slash příkazy, které nejsou „skill" a jen šumí — do Commands je nedáváme.
 const BUILTIN_CMD_DENY = new Set([
@@ -219,15 +230,17 @@ const BUILTIN_CMD_DENY = new Set([
 ]);
 
 function readSessionTools(sessionFile) {
-  const skills = new Set();
-  const commands = new Set();
-  const builtin = new Set();
-  const mcp = new Map(); // server -> Set(tool)
+  const skills = new Map(); // name -> count
+  const commands = new Map();
+  const builtin = new Map();
+  const agents = new Map(); // subagent_type -> count
+  const mcp = new Map(); // server -> Map(tool -> count)
+  const bump = (m, k) => m.set(k, (m.get(k) || 0) + 1);
   let content;
   try {
     content = fs.readFileSync(sessionFile, 'utf8');
   } catch {
-    return { skills: [], commands: [], builtin: [], mcp: [] };
+    return { skills: [], commands: [], builtin: [], agents: [], mcp: [] };
   }
   for (const line of content.split('\n')) {
     const hasTool = line.includes('tool_use');
@@ -246,7 +259,7 @@ function readSessionTools(sessionFile) {
       const m = s.match(/<command-name>\/?([^<]+)<\/command-name>/);
       if (m) {
         const name = m[1].trim();
-        if (name && !BUILTIN_CMD_DENY.has(name)) commands.add(name);
+        if (name && !BUILTIN_CMD_DENY.has(name)) bump(commands, name);
       }
     }
     const mc = r.message && r.message.content;
@@ -254,25 +267,36 @@ function readSessionTools(sessionFile) {
     for (const c of mc) {
       if (!c || c.type !== 'tool_use' || typeof c.name !== 'string') continue;
       if (c.name === 'Skill' && c.input && c.input.skill) {
-        skills.add(c.input.skill);
+        bump(skills, c.input.skill);
+      } else if (AGENT_TOOLS.has(c.name)) {
+        const type = c.input && typeof c.input.subagent_type === 'string' ? c.input.subagent_type : '';
+        bump(agents, type || 'claude');
       } else if (c.name.startsWith('mcp__')) {
         const parts = c.name.slice(5).split('__');
         const server = parts[0] || 'mcp';
         const tool = parts.slice(1).join('__');
-        if (!mcp.has(server)) mcp.set(server, new Set());
-        if (tool) mcp.get(server).add(tool);
+        if (!mcp.has(server)) mcp.set(server, new Map());
+        if (tool) bump(mcp.get(server), tool);
       } else if (NOTABLE_BUILTIN.has(c.name)) {
-        builtin.add(c.name);
+        bump(builtin, c.name);
       }
     }
   }
   const prettyServer = (s) => s.replace(/^claude_ai_/, '').replace(/_/g, ' ');
+  // Map<name,count> → seřazené pole {name, count}.
+  const toList = (m) =>
+    [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([name, count]) => ({ name, count }));
   return {
-    skills: [...skills].sort(),
-    commands: [...commands].sort(),
-    builtin: [...builtin].sort(),
+    skills: toList(skills),
+    commands: toList(commands),
+    builtin: toList(builtin),
+    agents: toList(agents),
     mcp: [...mcp.entries()]
-      .map(([server, tools]) => ({ server: prettyServer(server), tools: [...tools].sort() }))
+      .map(([server, tools]) => ({
+        server: prettyServer(server),
+        tools: toList(tools),
+        count: [...tools.values()].reduce((a, b) => a + b, 0),
+      }))
       .sort((a, b) => a.server.localeCompare(b.server)),
   };
 }
@@ -736,19 +760,21 @@ class ToolsProvider extends BaseProvider {
     if (!projectDir) return [placeholder('No Claude session for this workspace')];
     const session = newestSessionFile(projectDir);
     if (!session) return [placeholder('No session (.jsonl) found')];
-    const { skills, commands, builtin, mcp } = readSessionTools(session);
-    if (!skills.length && !commands.length && !mcp.length && !builtin.length) {
+    const { skills, commands, builtin, agents, mcp } = readSessionTools(session);
+    if (!skills.length && !commands.length && !mcp.length && !builtin.length && !agents.length) {
       return [placeholder('No skills, commands, tools or MCP used in this session')];
     }
 
+    const cnt = (n) => n + '×';
     const roots = [];
     if (skills.length) {
       const g = new Node('Skills', EXPANDED);
       g.iconPath = new vscode.ThemeIcon('extensions');
       g.children = skills.map((s) => {
-        const i = new Node(s, LEAF);
+        const i = new Node(s.name, LEAF);
         i.iconPath = new vscode.ThemeIcon('zap');
-        i.command = { command: 'claudePanel.openSkill', title: 'Open skill', arguments: [s] };
+        i.description = cnt(s.count);
+        i.command = { command: 'claudePanel.openSkill', title: 'Open skill', arguments: [s.name] };
         return i;
       });
       roots.push(g);
@@ -757,8 +783,9 @@ class ToolsProvider extends BaseProvider {
       const g = new Node('Commands', EXPANDED);
       g.iconPath = new vscode.ThemeIcon('terminal');
       g.children = commands.map((c) => {
-        const i = new Node('/' + c, LEAF);
+        const i = new Node('/' + c.name, LEAF);
         i.iconPath = new vscode.ThemeIcon('symbol-event');
+        i.description = cnt(c.count);
         return i;
       });
       roots.push(g);
@@ -767,8 +794,21 @@ class ToolsProvider extends BaseProvider {
       const g = new Node('Built-in', EXPANDED);
       g.iconPath = new vscode.ThemeIcon('tools');
       g.children = builtin.map((b) => {
-        const i = new Node(b, LEAF);
-        i.iconPath = new vscode.ThemeIcon(BUILTIN_ICON[b] || 'tools');
+        const i = new Node(b.name, LEAF);
+        i.iconPath = new vscode.ThemeIcon(BUILTIN_ICON[b.name] || 'tools');
+        i.description = cnt(b.count);
+        return i;
+      });
+      roots.push(g);
+    }
+    if (agents.length) {
+      const g = new Node('Agents', EXPANDED);
+      g.iconPath = new vscode.ThemeIcon('rocket');
+      g.children = agents.map((a) => {
+        const kind = agentKind(a.name);
+        const i = new Node(a.name, LEAF);
+        i.iconPath = new vscode.ThemeIcon(kind === 'plugin' ? 'extensions' : kind === 'custom' ? 'person' : 'rocket');
+        i.description = (kind === 'builtin' ? 'built-in' : kind) + ' · ' + cnt(a.count);
         return i;
       });
       roots.push(g);
@@ -779,10 +819,11 @@ class ToolsProvider extends BaseProvider {
       g.children = mcp.map((m) => {
         const sn = new Node(m.server, COLLAPSED);
         sn.iconPath = new vscode.ThemeIcon('server');
-        sn.description = `${m.tools.length} tools`;
+        sn.description = `${m.tools.length} tools · ${cnt(m.count)}`;
         sn.children = m.tools.map((t) => {
-          const i = new Node(t, LEAF);
+          const i = new Node(t.name, LEAF);
           i.iconPath = new vscode.ThemeIcon('symbol-method');
+          i.description = cnt(t.count);
           return i;
         });
         return sn;
@@ -859,7 +900,7 @@ function buildModel() {
   };
 
   // TOOLS: skilly + MCP použité v aktivní session
-  const tools = activeSession ? readSessionTools(activeSession) : { skills: [], commands: [], builtin: [], mcp: [] };
+  const tools = activeSession ? readSessionTools(activeSession) : { skills: [], commands: [], builtin: [], agents: [], mcp: [] };
 
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;

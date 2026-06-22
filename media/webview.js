@@ -165,42 +165,70 @@
 
   function renderTools() {
     const t = model.tools;
-    const has = t && (t.skills.length || (t.commands && t.commands.length) || t.mcp.length || (t.builtin && t.builtin.length));
+    const has =
+      t &&
+      (t.skills.length ||
+        (t.commands && t.commands.length) ||
+        t.mcp.length ||
+        (t.builtin && t.builtin.length) ||
+        (t.agents && t.agents.length));
     if (!has) {
       return '<div class="empty-hint">No skills, commands, tools or MCP used in this session.</div>';
     }
+    const cnt = (n) => '<span class="meta">' + n + '×</span>';
     let html = '';
     if (t.skills.length) {
       const body = t.skills
         .map(
           (s) =>
-            '<div class="row clickable" data-skill="' + esc(s) + '"><span class="ico codicon codicon-zap"></span><span class="lbl">' + esc(s) + '</span></div>'
+            '<div class="row clickable" data-skill="' + esc(s.name) + '"><span class="ico codicon codicon-zap"></span><span class="lbl">' + esc(s.name) + '</span>' + cnt(s.count) + '</div>'
         )
         .join('');
       html += group('t:skills', '<span class="ico codicon codicon-extensions"></span><span class="lbl">Skills</span>', body);
     }
     if (t.commands && t.commands.length) {
       const body = t.commands
-        .map((c) => '<div class="row"><span class="ico codicon codicon-symbol-event"></span><span class="lbl">/' + esc(c) + '</span></div>')
+        .map((c) => '<div class="row"><span class="ico codicon codicon-symbol-event"></span><span class="lbl">/' + esc(c.name) + '</span>' + cnt(c.count) + '</div>')
         .join('');
       html += group('t:commands', '<span class="ico codicon codicon-terminal"></span><span class="lbl">Commands</span>', body);
     }
     if (t.builtin && t.builtin.length) {
-      const icons = { WebSearch: 'search', WebFetch: 'globe', Task: 'rocket', Agent: 'rocket' };
+      const icons = { WebSearch: 'search', WebFetch: 'globe' };
       const body = t.builtin
-        .map((b) => '<div class="row"><span class="ico codicon codicon-' + (icons[b] || 'tools') + '"></span><span class="lbl">' + esc(b) + '</span></div>')
+        .map((b) => '<div class="row"><span class="ico codicon codicon-' + (icons[b.name] || 'tools') + '"></span><span class="lbl">' + esc(b.name) + '</span>' + cnt(b.count) + '</div>')
         .join('');
       html += group('t:builtin', '<span class="ico codicon codicon-tools"></span><span class="lbl">Built-in</span>', body);
+    }
+    if (t.agents && t.agents.length) {
+      const BUILTIN_AGENTS = ['claude', 'general-purpose', 'Explore', 'Plan', 'statusline-setup'];
+      const kindOf = (a) => (a.indexOf(':') >= 0 ? 'plugin' : BUILTIN_AGENTS.indexOf(a) >= 0 ? 'builtin' : 'custom');
+      const ico = { plugin: 'extensions', custom: 'person', builtin: 'rocket' };
+      const body = t.agents
+        .map((a) => {
+          const k = kindOf(a.name);
+          const meta = (k === 'builtin' ? 'built-in' : k) + ' · ' + a.count + '×';
+          return (
+            '<div class="row"><span class="ico codicon codicon-' +
+            ico[k] +
+            '"></span><span class="lbl">' +
+            esc(a.name) +
+            '</span><span class="meta">' +
+            meta +
+            '</span></div>'
+          );
+        })
+        .join('');
+      html += group('t:agents', '<span class="ico codicon codicon-rocket"></span><span class="lbl">Agents</span>', body);
     }
     if (t.mcp.length) {
       const servers = t.mcp
         .map((m) => {
           const tools = m.tools
-            .map((tool) => '<div class="row"><span class="ico codicon codicon-symbol-method"></span><span class="lbl">' + esc(tool) + '</span></div>')
+            .map((tool) => '<div class="row"><span class="ico codicon codicon-symbol-method"></span><span class="lbl">' + esc(tool.name) + '</span>' + cnt(tool.count) + '</div>')
             .join('');
           return group(
             't:mcp:' + m.server,
-            '<span class="ico codicon codicon-server"></span><span class="lbl">' + esc(m.server) + '</span><span class="meta">' + m.tools.length + '</span>',
+            '<span class="ico codicon codicon-server"></span><span class="lbl">' + esc(m.server) + '</span><span class="meta">' + m.tools.length + ' · ' + m.count + '×</span>',
             tools
           );
         })
@@ -259,7 +287,7 @@
       section('To Do History', 'sec:history', renderHistory()) +
       section('Tools', 'sec:tools', renderTools()) +
       section('Usage', 'sec:usage', renderUsage()) +
-      section('Instructions', 'sec:context', renderContext()) +
+      section('Brain', 'sec:context', renderContext()) +
       section('Plans', 'sec:plans', renderPlans());
   }
 

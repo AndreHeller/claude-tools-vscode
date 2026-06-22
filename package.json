@@ -2,7 +2,7 @@
   "name": "claude-tools",
   "displayName": "Claude Tools",
   "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -52,7 +52,7 @@
         },
         {
           "id": "claudeContext",
-          "name": "Instructions",
+          "name": "Brain",
           "when": "claudeTools.mode == 'tree'"
         },
         {
