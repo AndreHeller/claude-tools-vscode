@@ -102,6 +102,36 @@
     );
   }
 
+  // Přepínač session — jen když projekt běží ve víc session NARÁZ (2+ živé).
+  // Archiv session sem nepatří (na ten je tlačítko Select Session → QuickPick).
+  // Volba zafixuje (sticky) sledovanou session pro Progress / Tools / Usage.
+  function renderSessionPicker() {
+    const list = model.sessions || [];
+    const active = model.activeSessionId;
+    const selected = model.selectedSessionId; // null = auto režim
+    // živé + případně právě sledovaná (i když už doběhla), ať je vidět co sleduješ
+    const shown = list.filter((s) => s.live || s.id === active);
+    if (shown.length < 2) return '';
+    const opts = shown
+      .map((s) => {
+        // v auto režimu je vybraná položka „Auto", ne konkrétní session
+        const sel = selected != null && s.id === selected ? ' selected' : '';
+        const dot = s.live ? '● ' : '○ ';
+        return '<option value="' + esc(s.id) + '"' + sel + '>' + dot + esc(s.title) + '</option>';
+      })
+      .join('');
+    const autoSel = selected == null ? ' selected' : '';
+    return (
+      '<div class="session-picker">' +
+      '<span class="sp-label codicon codicon-comment-discussion"></span>' +
+      '<select class="sp-select" id="sessionSelect">' +
+      '<option value="__auto__"' + autoSel + '>↻ Auto (nejnovější)</option>' +
+      opts +
+      '</select>' +
+      '</div>'
+    );
+  }
+
   function renderProgress() {
     const p = model.progress;
     if (!p || !p.total) {
@@ -283,6 +313,7 @@
     const p = model.progress;
     const pMeta = p && p.total ? p.done + '/' + p.total : '';
     root.innerHTML =
+      renderSessionPicker() +
       section('To Do Progress', 'sec:progress', renderProgress(), pMeta) +
       section('To Do History', 'sec:history', renderHistory()) +
       section('Tools', 'sec:tools', renderTools()) +
@@ -326,6 +357,13 @@
     if (t.dataset.toggle !== undefined) {
       toggle(t.dataset.toggle);
     }
+  });
+
+  // Přepnutí sledované session přes dropdown (change, ne click).
+  document.getElementById('root').addEventListener('change', (e) => {
+    const sel = e.target.closest('#sessionSelect');
+    if (!sel) return;
+    vscode.postMessage({ type: 'selectSession', id: sel.value === '__auto__' ? null : sel.value });
   });
 
   window.addEventListener('message', (e) => {

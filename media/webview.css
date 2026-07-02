@@ -394,3 +394,32 @@ body.skin-compact .ghdr {
   padding-top: 1px;
   padding-bottom: 1px;
 }
+
+/* ---------- přepínač session (víc paralelních session v projektu) ---------- */
+.session-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 6px;
+}
+.session-picker .sp-label {
+  flex: none;
+  opacity: 0.7;
+  font-size: 1em;
+}
+.sp-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border, transparent));
+  border-radius: var(--radius);
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-font-family);
+  font-size: 0.95em;
+  cursor: pointer;
+}
+.sp-select:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}

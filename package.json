@@ -2,7 +2,7 @@
   "name": "claude-tools",
   "displayName": "Claude Tools",
   "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -103,6 +103,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "claudePanel.selectSession",
+        "title": "Claude Tools: Select Session",
+        "icon": "$(list-selection)"
+      },
+      {
         "command": "claudePanel.openFile",
         "title": "Claude Tools: Open File"
       },
@@ -130,9 +135,14 @@
     "menus": {
       "view/title": [
         {
+          "command": "claudePanel.selectSession",
+          "when": "view == claudeProgress || view == claudeSessionTools || view == claudeUsage || view == claudeWebview",
+          "group": "navigation@1"
+        },
+        {
           "command": "claudePanel.refresh",
           "when": "view == claudeProgress || view == claudeHistory || view == claudeContext || view == claudeSessionTools || view == claudeUsage || view == claudePlans || view == claudeWebview",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [

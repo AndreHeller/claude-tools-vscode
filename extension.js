@@ -26,21 +26,123 @@ function projectDirForWorkspace() {
   return fs.existsSync(dir) ? dir : null;
 }
 
-// Nejnovější .jsonl přímo v projektové složce = aktivní session.
-function newestSessionFile(projectDir) {
+// Session považujeme za „živou", pokud do jejího transcriptu přibylo něco
+// v posledních 10 minutách (mtime). Slouží jen k odlišení v pickeru.
+const LIVE_WINDOW_MS = 10 * 60 * 1000;
+
+// Lehká metadata všech session — JEN z názvu a mtime, BEZ čtení obsahu.
+// Kritické: tohle je v hot path (activeSessionFile → Progress/Tools/Usage při
+// každém refreshi), takže tady nikdy nesaháme na obsah (transcript má i 20 MB).
+function listSessionsMeta(projectDir) {
+  let files;
   try {
-    const entries = fs
+    files = fs
       .readdirSync(projectDir)
       .filter((f) => f.endsWith('.jsonl'))
       .map((f) => {
         const full = path.join(projectDir, f);
-        return { full, mtime: fs.statSync(full).mtimeMs };
+        let mtime = 0;
+        try {
+          mtime = fs.statSync(full).mtimeMs;
+        } catch {
+          /* soubor zmizel mezi readdir a stat — ponech mtime=0 */
+        }
+        return { id: path.basename(f, '.jsonl'), file: full, mtime };
       })
       .sort((a, b) => b.mtime - a.mtime);
-    return entries.length ? entries[0].full : null;
+  } catch {
+    return [];
+  }
+  const now = Date.now();
+  return files.map((s) => ({ ...s, live: now - s.mtime < LIVE_WINDOW_MS }));
+}
+
+// Titulek session čteme jen z HLAVIČKY transcriptu (ai-title i první user prompt
+// jsou na začátku), takže načteme prvních ~64 KB, ne celý (klidně 20MB) soubor.
+// Cache dle mtime; mrtvé session se čtou jen jednou.
+const _titleCache = new Map();
+function readSessionTitleCheap(file) {
+  let mtime;
+  try {
+    mtime = fs.statSync(file).mtimeMs;
   } catch {
     return null;
   }
+  const cached = _titleCache.get(file);
+  if (cached && cached.mtime === mtime) return cached.title;
+
+  let title = null;
+  let firstPrompt = null;
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(65536);
+      const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
+      const lines = buf.toString('utf8', 0, bytes).split('\n');
+      if (bytes === buf.length) lines.pop(); // poslední řádek může být oříznutý
+      for (const line of lines) {
+        const hasTitle = !title && line.includes('"ai-title"');
+        const hasUser = !firstPrompt && line.includes('"type":"user"');
+        if (!hasTitle && !hasUser) continue;
+        let rec;
+        try {
+          rec = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (rec.type === 'ai-title' && rec.aiTitle && !title) title = rec.aiTitle;
+        if (rec.type === 'user' && !firstPrompt) {
+          const c = rec.message && rec.message.content;
+          if (typeof c === 'string') firstPrompt = c;
+          else if (Array.isArray(c)) {
+            const t = c.find((x) => x && x.type === 'text');
+            if (t) firstPrompt = t.text;
+          }
+        }
+        if (title) break; // ai-title je autoritativní, dál nečti
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    /* nečitelné — vrať fallback */
+  }
+  const label = title || (firstPrompt ? firstPrompt.replace(/\s+/g, ' ').trim().slice(0, 50) : null);
+  _titleCache.set(file, { mtime, title: label });
+  return label;
+}
+
+// Metadata + titulek (pro picker / QuickPick). Titulek je levný (jen hlavička),
+// takže i 45 session je v pohodě; navíc cachovaný dle mtime.
+function listAllSessions(projectDir) {
+  return listSessionsMeta(projectDir).map((s) => ({
+    ...s,
+    title: readSessionTitleCheap(s.file) || s.id.slice(0, 8),
+  }));
+}
+
+// Uložený výběr session (per workspace). Nastaví se z workspaceState v activate().
+let _extContext = null;
+const SELECTED_SESSION_KEY = 'claudeTools.selectedSession';
+function getSelectedSessionId() {
+  return _extContext ? _extContext.workspaceState.get(SELECTED_SESSION_KEY) || null : null;
+}
+function setSelectedSessionId(id) {
+  if (_extContext) _extContext.workspaceState.update(SELECTED_SESSION_KEY, id || undefined);
+}
+
+// Session, na kterou se váží Progress/Tools/Usage. Sticky: drží uživatelův výběr,
+// dokud daná session existuje; jinak (i bez výběru) fallback na nejnovější.
+// Tím panel přestane „blikat" mezi paralelními session dle toho, která zapsala poslední.
+function activeSessionFile(projectDir) {
+  const sessions = listSessionsMeta(projectDir); // jen stat, žádné čtení obsahu
+  if (!sessions.length) return null;
+  const sel = getSelectedSessionId();
+  if (sel) {
+    const found = sessions.find((s) => s.id === sel);
+    if (found) return found.file;
+  }
+  return sessions[0].file;
 }
 
 // ---------- parsování: poslední TodoWrite v session ----------
@@ -528,7 +630,7 @@ class ProgressProvider extends BaseProvider {
   getChildren() {
     const projectDir = projectDirForWorkspace();
     if (!projectDir) return [placeholder('No Claude session for this workspace')];
-    const session = newestSessionFile(projectDir);
+    const session = activeSessionFile(projectDir);
     if (!session) return [placeholder('No session (.jsonl) found')];
     const todos = readLatestTodos(session);
     if (!todos.length) return [placeholder('No todos in the active session')];
@@ -758,7 +860,7 @@ class ToolsProvider extends BaseProvider {
     if (element) return element.children;
     const projectDir = projectDirForWorkspace();
     if (!projectDir) return [placeholder('No Claude session for this workspace')];
-    const session = newestSessionFile(projectDir);
+    const session = activeSessionFile(projectDir);
     if (!session) return [placeholder('No session (.jsonl) found')];
     const { skills, commands, builtin, agents, mcp } = readSessionTools(session);
     if (!skills.length && !commands.length && !mcp.length && !builtin.length && !agents.length) {
@@ -840,7 +942,7 @@ class UsageProvider extends BaseProvider {
     if (element) return element.children;
     const projectDir = projectDirForWorkspace();
     if (!projectDir) return [placeholder('No Claude session for this workspace')];
-    const session = newestSessionFile(projectDir);
+    const session = activeSessionFile(projectDir);
     if (!session) return [placeholder('No session (.jsonl) found')];
     const u = readSessionUsage(session);
     if (!u) return [placeholder('No usage data')];
@@ -889,9 +991,13 @@ function buildModel() {
   const wsPath = folders && folders.length ? folders[0].uri.fsPath : null;
   const projectDir = projectDirForWorkspace();
 
+  // SESSIONS: přepínač živých/paralelních session + která je zrovna sledovaná
+  const allSessions = projectDir ? listAllSessions(projectDir) : [];
+  const activeSession = projectDir ? activeSessionFile(projectDir) : null;
+  const activeSessionId = activeSession ? path.basename(activeSession, '.jsonl') : null;
+
   // PROGRESS
   let todos = [];
-  const activeSession = projectDir ? newestSessionFile(projectDir) : null;
   if (activeSession) todos = readLatestTodos(activeSession);
   const progress = {
     done: todos.filter((t) => t.status === 'completed').length,
@@ -967,7 +1073,20 @@ function buildModel() {
     del: { kind: 'plan' },
   }));
 
-  return { progress, history, context, plans, tools, usage };
+  // jen odlehčená metadata pro picker (žádné dávky/tool výpisy)
+  const sessionList = allSessions.map((s) => ({ id: s.id, title: s.title, live: s.live, path: s.file }));
+
+  return {
+    progress,
+    history,
+    context,
+    plans,
+    tools,
+    usage,
+    sessions: sessionList,
+    activeSessionId,
+    selectedSessionId: getSelectedSessionId(), // null = auto (nejnovější)
+  };
 }
 
 class ClaudeWebviewProvider {
@@ -1018,6 +1137,10 @@ class ClaudeWebviewProvider {
       vscode.window.showTextDocument(vscode.Uri.file(msg.path));
     } else if (msg.type === 'openSkill' && msg.name) {
       vscode.commands.executeCommand('claudePanel.openSkill', msg.name);
+    } else if (msg.type === 'selectSession') {
+      // msg.id může být null → zruší sticky výběr (zpět na nejnovější)
+      setSelectedSessionId(msg.id || null);
+      vscode.commands.executeCommand('claudePanel.refresh');
     } else if (msg.type === 'delete' && msg.path) {
       // znovupoužij tree delete command (potvrzení + unlink + úklid MEMORY.md indexu + refresh)
       vscode.commands.executeCommand('claudePanel.deleteFile', {
@@ -1033,6 +1156,7 @@ class ClaudeWebviewProvider {
 // ---------- aktivace ----------
 
 function activate(context) {
+  _extContext = context; // zpřístupní workspaceState pro sticky výběr session
   const progress = new ProgressProvider();
   const history = new HistoryProvider();
   const context_ = new ContextProvider();
@@ -1084,6 +1208,33 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudePanel.refresh', refreshAll),
+    vscode.commands.registerCommand('claudePanel.selectSession', async () => {
+      const projectDir = projectDirForWorkspace();
+      if (!projectDir) {
+        vscode.window.showInformationMessage('No Claude session for this workspace.');
+        return;
+      }
+      const sessions = listAllSessions(projectDir);
+      if (!sessions.length) {
+        vscode.window.showInformationMessage('No sessions found for this project.');
+        return;
+      }
+      const activeId = getSelectedSessionId() || sessions[0].id;
+      const picks = sessions.map((s) => ({
+        label: (s.live ? '$(circle-filled) ' : '$(circle-outline) ') + s.title,
+        description:
+          (s.id === activeId ? 'tracked · ' : '') + new Date(s.mtime).toLocaleString(),
+        id: s.id,
+      }));
+      // volba pro návrat k automatice (nejnovější)
+      picks.push({ label: '$(sync) Auto (nejnovější session)', description: '', id: null });
+      const choice = await vscode.window.showQuickPick(picks, {
+        placeHolder: 'Vyber session, kterou sledovat v Progress / Tools / Usage',
+      });
+      if (choice === undefined) return;
+      setSelectedSessionId(choice.id);
+      refreshAll();
+    }),
     vscode.commands.registerCommand('claudePanel.openFile', (file) => {
       vscode.window.showTextDocument(vscode.Uri.file(file));
     }),
