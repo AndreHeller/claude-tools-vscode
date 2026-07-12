@@ -3,8 +3,13 @@
   "displayName": "Claude Tools",
   "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
   "version": "0.3.0",
-  "publisher": "local",
-  "private": true,
+  "publisher": "AndreHeller",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AndreHeller/claude-tools-vscode.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
