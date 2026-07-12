@@ -237,6 +237,52 @@ body {
   padding: 6px 4px;
 }
 
+/* ---------- Agents (live) ---------- */
+
+/* každý agent = orámovaná dlaždice, vždy pod sebou (ne grid) */
+.agent {
+  padding: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 8px;
+}
+.agent + .agent {
+  margin-top: 6px;
+}
+.agent .row {
+  padding: 2px 4px;
+}
+/* „právě dělá" / summary — druhý řádek, odsazený pod ikonu */
+.agent-action {
+  margin: 1px 4px 0 26px;
+  font-size: 0.9em;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-running .ico {
+  color: var(--vscode-charts-blue, #4daafc);
+}
+.agent-running .agent-action {
+  color: var(--vscode-charts-blue, #4daafc);
+  opacity: 0.85;
+}
+.agent-done .ico {
+  color: var(--vscode-charts-green, #89d185);
+}
+.agent-done .lbl {
+  opacity: 0.7;
+}
+.agent-failed .ico {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+.agent-failed .lbl {
+  opacity: 0.75;
+}
+.agent-summary {
+  font-style: italic;
+}
+
 /* context window bar (Usage) */
 .ctxbar {
   width: 100%;

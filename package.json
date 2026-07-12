@@ -2,7 +2,7 @@
   "name": "claude-tools",
   "displayName": "Claude Tools",
   "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "private": true,
   "engines": {
@@ -93,6 +93,25 @@
           ],
           "default": "auto",
           "description": "Context window size for the Usage %. The 1M flag can't be read from the session reliably — set it here if Auto guesses wrong."
+        },
+        "claudeTools.hiddenSections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["progress", "history", "tools", "agents", "usage", "brain", "plans"],
+            "enumDescriptions": [
+              "To Do Progress",
+              "To Do History",
+              "Tools",
+              "Agents (live subagents)",
+              "Usage",
+              "Brain",
+              "Plans"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Sections to hide permanently in the panel (webview cards/compact skins). Tick a section to remove it from the panel."
         }
       }
     },

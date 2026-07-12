@@ -268,6 +268,48 @@
     return html;
   }
 
+  // Živí subagenti (async Task/Agent): běžící se spinnerem + „právě dělá", pak
+  // dokončení / selhání. Cowork-styl přehled souběžné práce hlavního Clauda.
+  function renderAgents() {
+    const list = model.agents || [];
+    if (!list.length) return '<div class="empty-hint">No subagents in this session.</div>';
+    const rank = { running: 0, done: 1 }; // běžící nahoře; failed/ostatní dolů
+    const sorted = list.slice().sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2));
+    const st = {
+      running: { ico: 'loading codicon-modifier-spin', cls: 'agent-running' },
+      done: { ico: 'pass-filled', cls: 'agent-done' },
+    };
+    const rows = sorted
+      .map((a) => {
+        const s = st[a.status] || { ico: 'error', cls: 'agent-failed' };
+        const title = esc(a.name + (a.model ? ' · ' + a.model : '') + (a.summary ? '\n' + a.summary : ''));
+        const label = esc(a.description || a.name);
+        const meta = esc(a.name);
+        // běžící → live akce; dokončený → nic (summary „Agent X finished" jen duplikuje
+        // popis); selhalý/jiný → summary nese důvod (např. session limit), ten ukážeme
+        const action =
+          a.status === 'running'
+            ? a.action
+              ? '<div class="agent-action">▸ ' + esc(a.action) + '</div>'
+              : ''
+            : a.status === 'done'
+              ? ''
+              : a.summary
+                ? '<div class="agent-action agent-summary">' + esc(a.summary) + '</div>'
+                : '';
+        return (
+          '<div class="agent ' + s.cls + '" title="' + title + '">' +
+          '<div class="row"><span class="ico codicon codicon-' + s.ico + '"></span>' +
+          '<span class="lbl">' + label + '</span><span class="meta">' + meta + '</span></div>' +
+          action +
+          '</div>'
+        );
+      })
+      .join('');
+    // wrapper → v širokém panelu z něj CSS udělá grid dlaždic (viz @media)
+    return '<div class="agent-list">' + rows + '</div>';
+  }
+
   function renderUsage() {
     const u = model.usage;
     if (!u) return '<div class="empty-hint">No usage data yet.</div>';
@@ -312,14 +354,30 @@
     }
     const p = model.progress;
     const pMeta = p && p.total ? p.done + '/' + p.total : '';
-    root.innerHTML =
-      renderSessionPicker() +
-      section('To Do Progress', 'sec:progress', renderProgress(), pMeta) +
-      section('To Do History', 'sec:history', renderHistory()) +
-      section('Tools', 'sec:tools', renderTools()) +
-      section('Usage', 'sec:usage', renderUsage()) +
-      section('Brain', 'sec:context', renderContext()) +
-      section('Plans', 'sec:plans', renderPlans());
+    // Agents sekci ukazujeme jen když v session nějací subagenti jsou.
+    const agents = model.agents || [];
+    let agentsSection = '';
+    if (agents.length) {
+      const running = agents.filter((a) => a.status === 'running').length;
+      const done = agents.filter((a) => a.status === 'done').length;
+      const failed = agents.filter((a) => a.status !== 'running' && a.status !== 'done').length;
+      const parts = [];
+      if (running) parts.push(running + ' running');
+      if (done) parts.push(done + ' done');
+      if (failed) parts.push(failed + ' failed');
+      agentsSection = section('Agents', 'sec:agents', renderAgents(), parts.join(' · '));
+    }
+    // sekce, které si uživatel trvale schoval přes setting claudeTools.hiddenSections
+    const hidden = new Set(model.hiddenSections || []);
+    const secs = [];
+    if (!hidden.has('progress')) secs.push(section('To Do Progress', 'sec:progress', renderProgress(), pMeta));
+    if (!hidden.has('history')) secs.push(section('To Do History', 'sec:history', renderHistory()));
+    if (!hidden.has('tools')) secs.push(section('Tools', 'sec:tools', renderTools()));
+    if (!hidden.has('agents')) secs.push(agentsSection); // '' když session nemá agenty
+    if (!hidden.has('usage')) secs.push(section('Usage', 'sec:usage', renderUsage()));
+    if (!hidden.has('brain')) secs.push(section('Brain', 'sec:context', renderContext()));
+    if (!hidden.has('plans')) secs.push(section('Plans', 'sec:plans', renderPlans()));
+    root.innerHTML = renderSessionPicker() + secs.join('');
   }
 
   document.getElementById('root').addEventListener('click', (e) => {

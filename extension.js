@@ -403,6 +403,178 @@ function readSessionTools(sessionFile) {
   };
 }
 
+// ---------- parsování: běžící / dokončení subagenti (async Task/Agent) ----------
+//
+// Claude Code spouští subagenty ASYNCHRONNĚ na pozadí: tool_result se vrátí HNED
+// (status "async_launched"), ne až po dokončení. Párování tool_use↔tool_result
+// tedy stav běhu NEurčí. Zdroje pravdy:
+//   • spuštění: `toolUseResult.status === 'async_launched'` (agentId, description,
+//     resolvedModel, outputFile).
+//   • dokončení: <task-notification> s <task-id>…</task-id> + <status>…</status>
+//     (+ <summary>) — Claude Code ho zapíše do hlavní session (queue-operation
+//     i user zpráva). Sledovaný transcript se tedy o doběhu dozví sám.
+//   • subagent_type: z původního `Agent`/`Task` tool_use bloku, spárováno přes
+//     tool_use_id (v async_launched výsledku není).
+
+// Z <task-notification> bloku vytáhne task-id → { status, summary }.
+function parseTaskNotification(text) {
+  if (typeof text !== 'string' || !text.includes('<task-notification>')) return null;
+  const id = text.match(/<task-id>([^<]+)<\/task-id>/);
+  if (!id) return null;
+  const status = text.match(/<status>([^<]+)<\/status>/);
+  const summary = text.match(/<summary>([\s\S]*?)<\/summary>/);
+  return {
+    id: id[1].trim(),
+    status: status ? status[1].trim() : 'completed',
+    summary: summary ? summary[1].trim() : null,
+  };
+}
+
+// Poslední akce běžícího agenta z jeho výstupního transcriptu (JSONL v /tmp).
+// Čte se jen KONEC souboru (agentní transcript může narůst) — poslední tool_use
+// nebo krátký úryvek textu. Vrací např. "Edit stg_deals.sql" nebo "přemýšlí…".
+function readAgentLastAction(outputFile) {
+  let text;
+  try {
+    const size = fs.statSync(outputFile).size;
+    const want = 65536;
+    const start = Math.max(0, size - want);
+    const fd = fs.openSync(outputFile, 'r');
+    try {
+      const buf = Buffer.alloc(size - start);
+      const bytes = fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString('utf8', 0, bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  const lines = text.split('\n');
+  if (firstLineTruncated(lines)) lines.shift(); // první řádek může být oříznutý
+  let last = null;
+  for (const line of lines) {
+    if (!line.includes('tool_use') && !line.includes('"text"')) continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const mc = r.message && r.message.content;
+    if (!Array.isArray(mc)) continue;
+    for (const c of mc) {
+      if (!c) continue;
+      if (c.type === 'tool_use' && typeof c.name === 'string') {
+        last = agentActionLabel(c);
+      } else if (c.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
+        last = c.text.replace(/\s+/g, ' ').trim().slice(0, 60);
+      }
+    }
+  }
+  return last;
+}
+
+// true, pokud první řádek nezačíná '{' (oříznutý začátek po seeku doprostřed souboru).
+function firstLineTruncated(lines) {
+  return lines.length > 1 && !lines[0].trimStart().startsWith('{');
+}
+
+// Krátký lidský popis toho, co tool_use blok dělá: "Edit stg_deals.sql", "Bash", …
+function agentActionLabel(c) {
+  const inp = c.input || {};
+  const base = (p) => (typeof p === 'string' ? p.split('/').pop() : null);
+  if (c.name === 'Edit' || c.name === 'Write' || c.name === 'Read') {
+    const f = base(inp.file_path);
+    return f ? `${c.name} ${f}` : c.name;
+  }
+  if (c.name === 'Bash') return inp.description ? `Bash: ${inp.description}`.slice(0, 60) : 'Bash';
+  if (c.name === 'Grep') return inp.pattern ? `Grep ${inp.pattern}`.slice(0, 60) : 'Grep';
+  if (c.name === 'Glob') return inp.pattern ? `Glob ${inp.pattern}`.slice(0, 60) : 'Glob';
+  if (c.name === 'Skill' && inp.skill) return `Skill ${inp.skill}`;
+  if (c.name.startsWith('mcp__')) return c.name.slice(5).replace(/__/g, ' ');
+  return c.name;
+}
+
+// Subagenti aktivní session: běžící + dokončení, chronologicky (nejnovější první).
+// includeActions=true → u běžících dočte poslední akci z jejich output transcriptu.
+function readSessionAgents(sessionFile, includeActions) {
+  const byId = new Map(); // agentId -> { id, name, description, model, outputFile, status, summary }
+  const notes = new Map(); // agentId -> { status, summary }
+  const byToolUse = new Map(); // tool_use_id -> subagent_type (z Agent tool_use)
+  let content;
+  try {
+    content = fs.readFileSync(sessionFile, 'utf8');
+  } catch {
+    return [];
+  }
+  for (const line of content.split('\n')) {
+    const hasLaunch = line.includes('async_launched');
+    const hasNote = line.includes('<task-notification>');
+    const hasAgentUse = line.includes('subagent_type');
+    if (!hasLaunch && !hasNote && !hasAgentUse) continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    // Agent/Task tool_use → mapa tool_use_id → subagent_type.
+    const mc = r.message && r.message.content;
+    if (Array.isArray(mc)) {
+      for (const c of mc) {
+        if (c && c.type === 'tool_use' && AGENT_TOOLS.has(c.name) && c.input) {
+          if (typeof c.input.subagent_type === 'string') byToolUse.set(c.id, c.input.subagent_type);
+        }
+      }
+    }
+    // Spuštění async agenta.
+    const tur = r.toolUseResult;
+    if (tur && typeof tur === 'object' && tur.status === 'async_launched' && tur.agentId) {
+      let toolUseId = null;
+      if (Array.isArray(mc)) {
+        const res = mc.find((c) => c && c.type === 'tool_result' && c.tool_use_id);
+        if (res) toolUseId = res.tool_use_id;
+      }
+      byId.set(tur.agentId, {
+        id: tur.agentId,
+        name: byToolUse.get(toolUseId) || 'claude',
+        description: tur.description || '',
+        model: tur.resolvedModel || null,
+        outputFile: tur.outputFile || null,
+        status: 'running',
+        summary: null,
+      });
+    }
+    // Dokončení (task-notification může být v `content` queue-operation i v user message).
+    if (hasNote) {
+      const texts = [];
+      if (typeof r.content === 'string') texts.push(r.content);
+      const umc = r.message && r.message.content;
+      if (typeof umc === 'string') texts.push(umc);
+      else if (Array.isArray(umc)) for (const c of umc) if (c && typeof c.text === 'string') texts.push(c.text);
+      for (const t of texts) {
+        const n = parseTaskNotification(t);
+        if (n) notes.set(n.id, n);
+      }
+    }
+  }
+  // Slouč completion notifikace do agentů.
+  const agents = [...byId.values()].map((a) => {
+    const n = notes.get(a.id);
+    if (n) return { ...a, status: n.status === 'completed' ? 'done' : n.status, summary: n.summary };
+    return a;
+  });
+  // Live akce jen pro běžící (a jen když je vyžádáno).
+  if (includeActions) {
+    for (const a of agents) {
+      if (a.status === 'running' && a.outputFile) a.action = readAgentLastAction(a.outputFile);
+    }
+  }
+  agents.reverse(); // nejnovější spuštěné první
+  return agents;
+}
+
 // Zkrácený formát tokenů: 528310 → "528k", 1234567 → "1.2M".
 function fmtTokens(n) {
   if (!n) return '0';
@@ -448,12 +620,12 @@ function readSessionUsage(sessionFile) {
   }
   if (!model && !contextTokens) return null;
   // Limit nejde z modelu spolehlivě vyčíst (sufix [1m] v transcriptu není). Setting přebije.
-  // Auto: Opus jede s 1M oknem; jinak fallback dle pozorovaného maxima.
+  // Auto: Opus i Fable jedou s 1M oknem; jinak fallback dle pozorovaného maxima.
   const cfg = vscode.workspace.getConfiguration('claudeTools').get('contextWindow', 'auto');
   let limit;
   if (cfg === '200000') limit = 200000;
   else if (cfg === '1000000') limit = 1000000;
-  else limit = (model && /opus/i.test(model)) || maxContext > 200000 ? 1000000 : 200000;
+  else limit = (model && /opus|fable/i.test(model)) || maxContext > 200000 ? 1000000 : 200000;
   return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal };
 }
 
@@ -1008,6 +1180,9 @@ function buildModel() {
   // TOOLS: skilly + MCP použité v aktivní session
   const tools = activeSession ? readSessionTools(activeSession) : { skills: [], commands: [], builtin: [], agents: [], mcp: [] };
 
+  // AGENTS (live): běžící / dokončení async subagenti aktivní session
+  const agents = activeSession ? readSessionAgents(activeSession, true) : [];
+
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;
 
@@ -1082,10 +1257,13 @@ function buildModel() {
     context,
     plans,
     tools,
+    agents,
     usage,
     sessions: sessionList,
     activeSessionId,
     selectedSessionId: getSelectedSessionId(), // null = auto (nejnovější)
+    // sekce, které si uživatel trvale schoval (setting) — webview je nevykreslí
+    hiddenSections: vscode.workspace.getConfiguration('claudeTools').get('hiddenSections', []),
   };
 }
 
@@ -1193,8 +1371,38 @@ function activate(context) {
         usage.refresh();
         webview.refresh();
       }
+      if (e.affectsConfiguration('claudeTools.hiddenSections')) {
+        webview.refresh();
+      }
     })
   );
+
+  // Live polling běžících subagentů: „právě dělá" se čte z jejich output transcriptů
+  // v /tmp, kam fs.watch na projektové složce nedosáhne. Poll běží JEN dokud aspoň
+  // jeden agent běží, pak se sám vypne (žádné trvalé čtení velkého transcriptu).
+  const LIVE_POLL_MS = 2000;
+  let livePoll = null;
+  const hasRunningAgents = () => {
+    const pd = projectDirForWorkspace();
+    if (!pd) return false;
+    const s = activeSessionFile(pd);
+    return s ? readSessionAgents(s, false).some((a) => a.status === 'running') : false;
+  };
+  const syncLivePolling = () => {
+    const running = hasRunningAgents();
+    if (running && !livePoll) {
+      livePoll = setInterval(() => {
+        webview.refresh();
+        if (!hasRunningAgents()) {
+          clearInterval(livePoll);
+          livePoll = null;
+        }
+      }, LIVE_POLL_MS);
+    } else if (!running && livePoll) {
+      clearInterval(livePoll);
+      livePoll = null;
+    }
+  };
 
   const refreshAll = () => {
     progress.refresh();
@@ -1204,6 +1412,7 @@ function activate(context) {
     usage.refresh();
     plans.refresh();
     webview.refresh();
+    syncLivePolling();
   };
 
   context.subscriptions.push(
@@ -1309,7 +1518,12 @@ function activate(context) {
   }
   watch(PLANS_DIR);
 
-  context.subscriptions.push({ dispose: () => watchers.forEach((w) => w.close()) });
+  context.subscriptions.push({
+    dispose: () => {
+      watchers.forEach((w) => w.close());
+      if (livePoll) clearInterval(livePoll);
+    },
+  });
 
   refreshAll();
 }
