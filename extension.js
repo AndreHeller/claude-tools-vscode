@@ -629,6 +629,88 @@ function readSessionUsage(sessionFile) {
   return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal };
 }
 
+// ---------- parsování: hook hlášky (hook_system_message) ----------
+//
+// Hook může uživateli vypsat hlášku přes {"systemMessage": "..."} — terminál ji
+// ukáže hned, ale VS Code UI Claude Code ne. Claude Code ji ovšem zapíše do
+// transcriptu jako attachment `hook_system_message`, odsud ji čteme.
+// Víceřádkový systemMessage = víc hlášek (po řádcích, stejně jako v terminálu).
+
+const NOTIF_SEVERITY = { '⚠': 'warning', '✖': 'error', '✗': 'error', '❌': 'error' };
+
+// Vodicí symbol (⚠ / ℹ / ✗ …) určí závažnost a z textu se odstraní — ikonu
+// kreslí panel/toast sám, jinak by byla dvakrát.
+function parseNotifLine(line) {
+  const m = line.match(/^([⚠ℹ✖✗❌])️?\s*/);
+  if (!m) return { text: line, severity: 'info' };
+  return { text: line.slice(m[0].length), severity: NOTIF_SEVERITY[m[1]] || 'info' };
+}
+
+// Hlášky hooků aktivní session, nejnovější první. Identický text sbalí do
+// jednoho řádku s počtem výskytů — i napříč hooky (stejné varování opakuje
+// SessionStart:startup, :resume po reloadu i Stop hook každý turn).
+function readSessionNotifications(sessionFile) {
+  let content;
+  try {
+    content = fs.readFileSync(sessionFile, 'utf8');
+  } catch {
+    return [];
+  }
+  const byText = new Map(); // text -> { text, severity, hook, event, ts, count }
+  for (const line of content.split('\n')) {
+    if (!line.includes('"hook_system_message"')) continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const a = r.attachment;
+    if (!a || a.type !== 'hook_system_message' || typeof a.content !== 'string') continue;
+    const hook = a.hookName || a.hookEvent || 'hook';
+    for (const raw of a.content.split('\n')) {
+      const t = raw.trim();
+      if (!t) continue;
+      const { text, severity } = parseNotifLine(t);
+      const prev = byText.get(text);
+      if (prev) {
+        prev.count += 1;
+        prev.ts = r.timestamp || prev.ts;
+        prev.hook = hook; // poslední výskyt určuje zobrazený zdroj
+        prev.event = a.hookEvent || prev.event;
+      } else {
+        byText.set(text, { text, severity, hook, event: a.hookEvent || '', ts: r.timestamp || null, count: 1 });
+      }
+    }
+  }
+  // ISO timestamp se řadí lexikograficky == chronologicky; nejnovější první
+  return [...byText.values()].sort((x, y) => String(y.ts || '').localeCompare(String(x.ts || '')));
+}
+
+// Zavřené hlášky (křížek v panelu) — do transcriptu se nesahá, klíče
+// `sessionId|text` se drží ve workspaceState. Nová session tak startuje čistá
+// a zavřená hláška se nevrátí, ani když ji hook zapíše znovu.
+const DISMISSED_NOTIF_KEY = 'claudeTools.dismissedNotifications';
+function getDismissedNotifications() {
+  return _extContext ? _extContext.workspaceState.get(DISMISSED_NOTIF_KEY) || [] : [];
+}
+function dismissNotification(key) {
+  if (!_extContext) return;
+  const kept = getDismissedNotifications().filter((k) => k !== key);
+  kept.push(key);
+  // neomezenému růstu seznamu brání strop — starší klíče patří mrtvým sessions
+  _extContext.workspaceState.update(DISMISSED_NOTIF_KEY, kept.slice(-300));
+}
+
+// Hlášky session k zobrazení: načtené z transcriptu minus zavřené uživatelem.
+function visibleNotifications(sessionFile) {
+  const sid = path.basename(sessionFile, '.jsonl');
+  const dismissed = new Set(getDismissedNotifications());
+  return readSessionNotifications(sessionFile)
+    .map((n) => ({ ...n, dismissKey: sid + '|' + n.text }))
+    .filter((n) => !dismissed.has(n.dismissKey));
+}
+
 // Najde SKILL.md skillu v plugin cache (nejnovější verze; přeskočí temp_git klony).
 function findPluginSkill(skillPart) {
   const root = path.join(CLAUDE_HOME, 'plugins', 'cache');
@@ -822,6 +904,35 @@ class ProgressProvider extends BaseProvider {
       return item;
     });
     return [summary, ...items];
+  }
+}
+
+// Notifications panel — hlášky hooků (systemMessage) aktivní session.
+const NOTIF_ICON_COLOR = {
+  warning: ['warning', 'editorWarning.foreground'],
+  error: ['error', 'editorError.foreground'],
+  info: ['info', 'editorInfo.foreground'],
+};
+
+class NotificationsProvider extends BaseProvider {
+  getChildren() {
+    const projectDir = projectDirForWorkspace();
+    if (!projectDir) return [placeholder('No Claude session for this workspace')];
+    const session = activeSessionFile(projectDir);
+    if (!session) return [placeholder('No session (.jsonl) found')];
+    const notes = visibleNotifications(session);
+    if (!notes.length) return [placeholder('No hook messages in this session')];
+    return notes.map((n) => {
+      const [icon, color] = NOTIF_ICON_COLOR[n.severity] || NOTIF_ICON_COLOR.info;
+      const item = new vscode.TreeItem(n.text, vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor(color));
+      item.description = (n.count > 1 ? n.count + '× · ' : '') + n.hook;
+      item.tooltip = n.hook + (n.ts ? ' · ' + fmtTime(n.ts) : '') + '\n' + n.text;
+      // inline křížek (viz package.json view/item/context)
+      item.contextValue = 'dismissableNotification';
+      item.dismissKey = n.dismissKey;
+      return item;
+    });
   }
 }
 
@@ -1183,6 +1294,16 @@ function buildModel() {
   // AGENTS (live): běžící / dokončení async subagenti aktivní session
   const agents = activeSession ? readSessionAgents(activeSession, true) : [];
 
+  // NOTIFICATIONS: hlášky hooků (systemMessage) aktivní session, bez zavřených
+  const notifications = (activeSession ? visibleNotifications(activeSession) : []).map((n) => ({
+    text: n.text,
+    severity: n.severity,
+    hook: n.hook,
+    count: n.count,
+    time: n.ts ? fmtTime(n.ts) : '',
+    dismissKey: n.dismissKey,
+  }));
+
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;
 
@@ -1258,6 +1379,7 @@ function buildModel() {
     plans,
     tools,
     agents,
+    notifications,
     usage,
     sessions: sessionList,
     activeSessionId,
@@ -1319,6 +1441,8 @@ class ClaudeWebviewProvider {
       // msg.id může být null → zruší sticky výběr (zpět na nejnovější)
       setSelectedSessionId(msg.id || null);
       vscode.commands.executeCommand('claudePanel.refresh');
+    } else if (msg.type === 'dismissNotification' && msg.key) {
+      vscode.commands.executeCommand('claudePanel.dismissNotification', msg.key);
     } else if (msg.type === 'delete' && msg.path) {
       // znovupoužij tree delete command (potvrzení + unlink + úklid MEMORY.md indexu + refresh)
       vscode.commands.executeCommand('claudePanel.deleteFile', {
@@ -1341,9 +1465,11 @@ function activate(context) {
   const plans = new PlansProvider();
   const tools = new ToolsProvider();
   const usage = new UsageProvider();
+  const notifications = new NotificationsProvider();
   const webview = new ClaudeWebviewProvider(context.extensionUri);
 
   context.subscriptions.push(
+    vscode.window.registerTreeDataProvider('claudeNotifications', notifications),
     vscode.window.registerTreeDataProvider('claudeProgress', progress),
     vscode.window.registerTreeDataProvider('claudeHistory', history),
     vscode.window.registerTreeDataProvider('claudeContext', context_),
@@ -1404,7 +1530,37 @@ function activate(context) {
     }
   };
 
+  // Hook hlášky: context klíč (řídí viditelnost tree view Notifications) + toast.
+  // Toast jen pro SessionStart hlášky (Stop apod. běží každý turn — jen do panelu),
+  // jen jednou (Set) a jen čerstvé — staré hlášky při aktivaci extension netoastí,
+  // zůstávají v sekci Notifications.
+  const TOAST_FRESH_MS = 5 * 60 * 1000;
+  const toasted = new Set();
+  const updateNotifications = () => {
+    const pd = projectDirForWorkspace();
+    const session = pd ? activeSessionFile(pd) : null;
+    const notes = session ? visibleNotifications(session) : [];
+    vscode.commands.executeCommand('setContext', 'claudeTools.hasNotifications', notes.length > 0);
+    if (!session) return;
+    for (const n of notes) {
+      if (n.event !== 'SessionStart') continue;
+      // klíč bez hooku — stejný text po resume session znovu netoastí
+      const key = n.dismissKey;
+      if (toasted.has(key)) continue;
+      toasted.add(key);
+      const age = n.ts ? Date.now() - new Date(n.ts).getTime() : Infinity;
+      if (!(age < TOAST_FRESH_MS)) continue;
+      // Prefix se zdrojem — toast sám o sobě nemá vizuální vazbu na Claude;
+      // vlastní ikonu VS Code v notifikacích nepovoluje, emoji v textu ano.
+      const msg = '✳ Claude: ' + n.text;
+      if (n.severity === 'error') vscode.window.showErrorMessage(msg);
+      else if (n.severity === 'warning') vscode.window.showWarningMessage(msg);
+      else vscode.window.showInformationMessage(msg);
+    }
+  };
+
   const refreshAll = () => {
+    notifications.refresh();
     progress.refresh();
     history.refresh();
     context_.refresh();
@@ -1413,6 +1569,7 @@ function activate(context) {
     plans.refresh();
     webview.refresh();
     syncLivePolling();
+    updateNotifications();
   };
 
   context.subscriptions.push(
@@ -1446,6 +1603,12 @@ function activate(context) {
     }),
     vscode.commands.registerCommand('claudePanel.openFile', (file) => {
       vscode.window.showTextDocument(vscode.Uri.file(file));
+    }),
+    vscode.commands.registerCommand('claudePanel.dismissNotification', (arg) => {
+      const key = typeof arg === 'string' ? arg : arg && arg.dismissKey;
+      if (!key) return;
+      dismissNotification(key);
+      refreshAll();
     }),
     vscode.commands.registerCommand('claudePanel.openTranscript', (node) => {
       if (node && node.filePath) vscode.window.showTextDocument(vscode.Uri.file(node.filePath));

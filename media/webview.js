@@ -132,6 +132,25 @@
     );
   }
 
+  // Hlášky hooků (systemMessage) — to, co SessionStart/Stop hook vypíše do terminálu.
+  function renderNotifications() {
+    const ic = { warning: 'warning', error: 'error' };
+    return (model.notifications || [])
+      .map((n) => {
+        const sev = n.severity || 'info';
+        const title = esc(n.hook + (n.time ? ' · ' + n.time : ''));
+        return (
+          '<div class="row notif notif-' + sev + '" title="' + title + '">' +
+          '<span class="ico codicon codicon-' + (ic[sev] || 'info') + '"></span>' +
+          '<span class="lbl">' + esc(n.text) + '</span>' +
+          (n.count > 1 ? '<span class="meta">' + n.count + '×</span>' : '') +
+          '<button class="del" title="Dismiss" data-dismiss="' + esc(n.dismissKey) + '"><i class="codicon codicon-close"></i></button>' +
+          '</div>'
+        );
+      })
+      .join('');
+  }
+
   function renderProgress() {
     const p = model.progress;
     if (!p || !p.total) {
@@ -370,6 +389,11 @@
     // sekce, které si uživatel trvale schoval přes setting claudeTools.hiddenSections
     const hidden = new Set(model.hiddenSections || []);
     const secs = [];
+    // Notifications úplně nahoře, ale jen když session nějaké hook hlášky má.
+    const notifs = model.notifications || [];
+    if (!hidden.has('notifications') && notifs.length) {
+      secs.push(section('Notifications', 'sec:notifications', renderNotifications(), String(notifs.length)));
+    }
     if (!hidden.has('progress')) secs.push(section('To Do Progress', 'sec:progress', renderProgress(), pMeta));
     if (!hidden.has('history')) secs.push(section('To Do History', 'sec:history', renderHistory()));
     if (!hidden.has('tools')) secs.push(section('Tools', 'sec:tools', renderTools()));
@@ -381,10 +405,15 @@
   }
 
   document.getElementById('root').addEventListener('click', (e) => {
-    const t = e.target.closest('[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle]');
+    const t = e.target.closest('[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle],[data-dismiss]');
     if (!t) return;
     if (t.dataset.skill !== undefined) {
       vscode.postMessage({ type: 'openSkill', name: t.dataset.skill });
+      return;
+    }
+    if (t.dataset.dismiss !== undefined) {
+      vscode.postMessage({ type: 'dismissNotification', key: t.dataset.dismiss });
+      e.stopPropagation();
       return;
     }
     if (t.dataset.delPath !== undefined) {

@@ -237,6 +237,18 @@ body {
   padding: 6px 4px;
 }
 
+/* ---------- Notifications (hook hlášky) ---------- */
+
+.notif-warning .ico {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.notif-error .ico {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+.notif-info .ico {
+  color: var(--vscode-editorInfo-foreground, #3794ff);
+}
+
 /* ---------- Agents (live) ---------- */
 
 /* každý agent = orámovaná dlaždice, vždy pod sebou (ne grid) */
