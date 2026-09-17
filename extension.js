@@ -26,9 +26,59 @@ function projectDirForWorkspace() {
   return fs.existsSync(dir) ? dir : null;
 }
 
-// Session považujeme za „živou", pokud do jejího transcriptu přibylo něco
-// v posledních 10 minutách (mtime). Slouží jen k odlišení v pickeru.
+// ---------- živé session: běžící procesy Claude Code ----------
+//
+// mtime transcriptu NEŘÍKÁ, jestli session žije: session, ve které Claude čeká na
+// vstup, do souboru nepíše, a přesto normálně běží. Pravdivý zdroj je
+// ~/.claude/sessions/<pid>.json, který Claude Code píše při startu a při každé
+// změně stavu: { pid, sessionId, cwd, status: 'busy' | 'idle', name }.
+// Soubory po spadlých procesech ve složce zůstávají, takže PID se musí ověřit.
+const SESSIONS_DIR = path.join(CLAUDE_HOME, 'sessions');
+
+// Fallback, když složka sessions/ neexistuje (starší Claude Code): živá = do
+// transcriptu přibylo něco za posledních 10 minut.
 const LIVE_WINDOW_MS = 10 * 60 * 1000;
+
+// Krátká cache — listSessionsMeta je v hot path (každý refresh panelu), tohle
+// čte ~10 malých souborů a volá stat na procesy.
+const LIVE_CACHE_MS = 1000;
+let _liveCache = { at: 0, map: null };
+
+// sessionId -> { status, name, cwd } pro VŠECHNY právě běžící session (napříč
+// projekty; filtr na projekt dělá volající). null = složka sessions/ není k mání.
+function liveSessions() {
+  const now = Date.now();
+  if (now - _liveCache.at < LIVE_CACHE_MS) return _liveCache.map;
+  let files;
+  try {
+    files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
+  } catch {
+    _liveCache = { at: now, map: null };
+    return null;
+  }
+  const map = new Map();
+  for (const f of files) {
+    let d;
+    try {
+      d = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
+    } catch {
+      continue; // rozepsaný / poškozený soubor — přeskoč
+    }
+    if (!d || !d.sessionId || !d.pid) continue;
+    try {
+      process.kill(d.pid, 0); // signál 0 = jen test existence, proces nic nedostane
+    } catch {
+      continue; // osiřelý .json po spadlém procesu
+    }
+    map.set(d.sessionId, {
+      status: d.status === 'busy' ? 'busy' : 'idle',
+      name: typeof d.name === 'string' ? d.name : null,
+      cwd: typeof d.cwd === 'string' ? d.cwd : null,
+    });
+  }
+  _liveCache = { at: now, map };
+  return map;
+}
 
 // Lehká metadata všech session — JEN z názvu a mtime, BEZ čtení obsahu.
 // Kritické: tohle je v hot path (activeSessionFile → Progress/Tools/Usage při
@@ -54,7 +104,15 @@ function listSessionsMeta(projectDir) {
     return [];
   }
   const now = Date.now();
-  return files.map((s) => ({ ...s, live: now - s.mtime < LIVE_WINDOW_MS }));
+  const live = liveSessions();
+  return files.map((s) => {
+    const l = live ? live.get(s.id) : null;
+    return {
+      ...s,
+      live: live ? !!l : now - s.mtime < LIVE_WINDOW_MS,
+      status: l ? l.status : null, // 'busy' | 'idle' | null (neběží / neznámo)
+    };
+  });
 }
 
 // Titulek session čteme jen z HLAVIČKY transcriptu (ai-title i první user prompt
@@ -573,6 +631,287 @@ function readSessionAgents(sessionFile, includeActions) {
   }
   agents.reverse(); // nejnovější spuštěné první
   return agents;
+}
+
+// ---------- parsování: Tasks (Monitor — hlídače běžící na pozadí) ----------
+//
+// Monitor je shellová smyčka, kterou Claude pustí na pozadí, aby hlídala vnější
+// stav (review na PR, doběh CI, deploy). Od subagenta se liší tím, že nekončí
+// jedním výsledkem — hlásí se opakovaně, takže nese TIMELINE událostí, ne stav.
+// Zdroje pravdy:
+//   • spuštění: tool_use `Monitor` (description, command) + věta v tool_resultu
+//     „Monitor started (task <id>, <režim>)" — task id jinde v datech není.
+//   • události: <task-notification> s <event> (subagenti tam mají <status>).
+//   • ukončení: tool_use `TaskStop` s input.task_id.
+//
+// POZOR: tentýž event je v transcriptu několikrát (queue-operation při zařazení
+// i vyřízení, attachment `queued_command`, user zpráva) — nutná deduplikace.
+
+const MONITOR_START_RE = /Monitor started \(task ([a-z0-9]+)(?:,\s*([^)]*))?\)/;
+// Stejný text po delší pauze = nová událost, ne přepis téže — viz dedup níž.
+const TASK_EVENT_DEDUP_MS = 120 * 1000;
+// Bez tepu déle než násobek intervalu → monitor je nejspíš po smrti (měkký odhad).
+const TASK_STALE_FACTOR = 3;
+// Když interval neznáme (smyčka je ve skriptu, co už nemáme), platí tenhle strop.
+const TASK_STALE_FALLBACK_MS = 15 * 60 * 1000;
+
+// Z <task-notification> vytáhne událost monitoru (nemá <status> jako subagent).
+function parseTaskEvent(text) {
+  if (typeof text !== 'string' || !text.includes('<task-notification>')) return null;
+  const id = text.match(/<task-id>([^<]+)<\/task-id>/);
+  const ev = text.match(/<event>([\s\S]*?)<\/event>/);
+  if (!id || !ev) return null;
+  const event = ev[1].trim();
+  if (!event) return null;
+  return { id: id[1].trim(), event };
+}
+
+// Nejčastější `sleep N` v shellovém textu — v chybové větvi bývá vlastní sleep.
+function sleepFromShell(text) {
+  const counts = new Map();
+  for (const m of text.matchAll(/\bsleep\s+(\d+)/g)) {
+    const n = parseInt(m[1], 10);
+    if (n > 0) counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  let best = null;
+  for (const [n, c] of counts) if (!best || c > best[1]) best = [n, c];
+  return best ? best[0] : null;
+}
+
+// Interval hlídání: `sleep 60` → 60. Monitor ale často jen spouští skript
+// (`bash …/watch_prs.sh`) a smyčka je až uvnitř něj, tak se dočte i ten.
+function monitorInterval(command) {
+  if (typeof command !== 'string') return null;
+  const direct = sleepFromShell(command);
+  if (direct) return direct;
+  const ref = command.match(/(?:^|\s)(?:bash|sh|zsh)\s+(\/[^\s'"]+)/);
+  if (ref) {
+    try {
+      const st = fs.statSync(ref[1]);
+      if (st.isFile() && st.size < 256 * 1024) return sleepFromShell(fs.readFileSync(ref[1], 'utf8'));
+    } catch {
+      /* skript zmizel (scratchpad se uklízí) — interval prostě neznáme */
+    }
+  }
+  return null;
+}
+
+// Režim životnosti z věty tool_resultu. Tři tvary, které Claude Code píše:
+//   „persistent — runs until TaskStop or session end"
+//   „expires in 30m unless the source ends first; …"
+//   „timeout 3600000ms"
+function monitorLifetime(mode) {
+  if (typeof mode !== 'string') return { persistent: false, ms: null };
+  if (mode.includes('persistent')) return { persistent: true, ms: null };
+  const min = mode.match(/expires in (\d+)\s*m/);
+  if (min) return { persistent: false, ms: parseInt(min[1], 10) * 60 * 1000 };
+  const ms = mode.match(/timeout (\d+)\s*ms/);
+  if (ms) return { persistent: false, ms: parseInt(ms[1], 10) };
+  return { persistent: false, ms: null };
+}
+
+// Výstupní soubor monitoru. Na rozdíl od subagenta ho tool_result nenese, takže
+// se skládá — kódovaná cesta projektu je rovnou názvem složky s transcriptem.
+function taskOutputFile(sessionFile, taskId) {
+  const encoded = path.basename(path.dirname(sessionFile));
+  const sessionId = path.basename(sessionFile, '.jsonl');
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const roots = [];
+  if (uid != null) roots.push(path.join('/tmp', 'claude-' + uid));
+  roots.push(path.join(os.tmpdir(), 'claude-' + uid));
+  for (const root of roots) {
+    const f = path.join(root, encoded, sessionId, 'tasks', taskId + '.output');
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}
+
+// Syrový parse monitorů z transcriptu — bez stavu, který závisí na čase.
+// Cachuje se podle mtime+velikosti, protože Tasks se čtou ze VŠECH živých session
+// projektu a transcript má klidně pár MB; bez cache by každý refresh znamenal
+// přečíst je všechny znovu.
+const _monitorCache = new Map(); // soubor -> { mtime, size, parsed }
+
+function emptyMonitorState() {
+  return {
+    byId: new Map(), // taskId -> { id, description, command, interval, … }
+    byToolUse: new Map(), // tool_use_id -> vstup Monitoru (task id je až ve výsledku)
+    events: new Map(), // taskId -> [{ at, text }]
+    stopped: new Set(), // taskId, na který padl TaskStop
+  };
+}
+
+// Doplní stav o monitory z dalších řádků transcriptu. Je additivní, takže se dá
+// volat i jen na nově přibylý kus souboru.
+function parseMonitorLines(text, state) {
+  const { byId, byToolUse, events, stopped } = state;
+  for (const line of text.split('\n')) {
+    const hasMonitor = line.includes('Monitor');
+    const hasNote = line.includes('<task-notification>');
+    const hasStop = line.includes('TaskStop');
+    if (!hasMonitor && !hasNote && !hasStop) continue;
+    let r;
+    try {
+      r = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ts = r.timestamp ? Date.parse(r.timestamp) : null;
+    const mc = r.message && r.message.content;
+    if (Array.isArray(mc)) {
+      for (const c of mc) {
+        if (!c) continue;
+        // Zadání monitoru — task id tady ještě není, drží se přes tool_use_id.
+        if (c.type === 'tool_use' && c.name === 'Monitor' && c.input) {
+          byToolUse.set(c.id, {
+            description: typeof c.input.description === 'string' ? c.input.description : '',
+            command: typeof c.input.command === 'string' ? c.input.command : '',
+            at: ts,
+          });
+        }
+        if (c.type === 'tool_use' && c.name === 'TaskStop' && c.input && c.input.task_id) {
+          stopped.add(String(c.input.task_id));
+        }
+        // Výsledek se startovní větou → teprve tady se dozvíme task id.
+        if (c.type === 'tool_result') {
+          const raw = typeof c.content === 'string' ? c.content : JSON.stringify(c.content || '');
+          const m = raw.match(MONITOR_START_RE);
+          if (m) {
+            const spec = byToolUse.get(c.tool_use_id) || { description: '', command: '', at: ts };
+            const life = monitorLifetime(m[2]);
+            byId.set(m[1], {
+              id: m[1],
+              description: spec.description,
+              command: spec.command,
+              interval: monitorInterval(spec.command),
+              persistent: life.persistent,
+              lifetimeMs: life.ms,
+              startedAt: spec.at || ts,
+            });
+          }
+        }
+      }
+    }
+    // Události: queue-operation (r.content), attachment i user zpráva.
+    if (hasNote) {
+      const texts = [];
+      if (typeof r.content === 'string') texts.push(r.content);
+      if (r.attachment && typeof r.attachment.prompt === 'string') texts.push(r.attachment.prompt);
+      if (typeof mc === 'string') texts.push(mc);
+      else if (Array.isArray(mc)) for (const c of mc) if (c && typeof c.text === 'string') texts.push(c.text);
+      for (const t of texts) {
+        const e = parseTaskEvent(t);
+        if (!e) continue;
+        const list = events.get(e.id) || [];
+        // Dedup: tentýž text zapsaný několikrát v rámci jednoho doručení je jedna
+        // událost; po delší pauze jde o nový výskyt (monitor hlásí stále stejné).
+        const dup = list.find((x) => x.text === e.event && Math.abs((x.at || 0) - (ts || 0)) < TASK_EVENT_DEDUP_MS);
+        if (dup) {
+          if (ts && (!dup.at || ts < dup.at)) dup.at = ts; // drž nejstarší čas doručení
+          continue;
+        }
+        list.push({ at: ts, text: e.event });
+        events.set(e.id, list);
+      }
+    }
+  }
+  return state;
+}
+
+// Přečte kus souboru [from, to) jako text.
+function readRange(file, from, to) {
+  const len = to - from;
+  if (len <= 0) return '';
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(len);
+    const bytes = fs.readSync(fd, buf, 0, len, from);
+    return buf.toString('utf8', 0, bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Parse s cache. Transcript je append-only, takže když soubor jen narostl, čte se
+// POUZE přírůstek — jinak by každý zápis do běžící session znamenal přeparsovat
+// klidně 11 MB při každém refreshi panelu.
+function cachedMonitors(sessionFile) {
+  let st;
+  try {
+    st = fs.statSync(sessionFile);
+  } catch {
+    return emptyMonitorState();
+  }
+  const hit = _monitorCache.get(sessionFile);
+  if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit.state;
+  let state;
+  let from = 0;
+  if (hit && st.size > hit.parsedTo) {
+    state = hit.state; // dočítáme, co přibylo za koncem posledního celého řádku
+    from = hit.parsedTo;
+  } else {
+    state = emptyMonitorState(); // první čtení nebo soubor přepsán/zkrácen
+  }
+  let text;
+  try {
+    text = readRange(sessionFile, from, st.size);
+  } catch {
+    return state;
+  }
+  // Poslední řádek může být rozepsaný — zpracuje se až příště, až bude celý.
+  const cut = text.lastIndexOf('\n');
+  const usable = cut >= 0 ? text.slice(0, cut + 1) : '';
+  parseMonitorLines(usable, state);
+  _monitorCache.set(sessionFile, {
+    size: st.size,
+    mtime: st.mtimeMs,
+    parsedTo: from + Buffer.byteLength(usable, 'utf8'),
+    state,
+  });
+  // strop, ať mapa neroste s každou session projektu
+  if (_monitorCache.size > 24) _monitorCache.delete(_monitorCache.keys().next().value);
+  return state;
+}
+
+// Monitory jedné session: nejnovější spuštěné první, každý s timeline událostí.
+// sessionLive = běží ještě proces té session (persistent monitor s ní umírá).
+function readSessionTasks(sessionFile, sessionLive) {
+  const { byId, events, stopped } = cachedMonitors(sessionFile);
+  const now = Date.now();
+  const tasks = [...byId.values()].map((t) => {
+    const list = (events.get(t.id) || []).sort((a, b) => (a.at || 0) - (b.at || 0));
+    let status;
+    if (stopped.has(t.id)) status = 'stopped';
+    else if (!sessionLive) status = 'ended'; // persistent monitor nepřežije svou session
+    else if (t.lifetimeMs && t.startedAt && now > t.startedAt + t.lifetimeMs) status = 'expired';
+    else status = 'running';
+    let stale = false;
+    let lastBeat = null;
+    if (status === 'running') {
+      const out = taskOutputFile(sessionFile, t.id);
+      try {
+        if (out) lastBeat = fs.statSync(out).mtimeMs;
+      } catch {
+        /* soubor zmizel — ber jako bez tepu */
+      }
+      const last = lastBeat || t.startedAt;
+      const window = t.interval ? t.interval * 1000 * TASK_STALE_FACTOR : TASK_STALE_FALLBACK_MS;
+      if (last && now - last > window) stale = true;
+    }
+    return {
+      id: t.id,
+      description: t.description || 'Monitor ' + t.id,
+      interval: t.interval,
+      persistent: t.persistent,
+      startedAt: t.startedAt,
+      status,
+      stale,
+      lastBeat, // poslední zápis monitoru; null = od startu nic nenapsal
+      events: list.map((e) => ({ at: e.at, text: e.text })),
+    };
+  });
+  tasks.reverse(); // nejnovější spuštěné první
+  return tasks;
 }
 
 // Zkrácený formát tokenů: 528310 → "528k", 1234567 → "1.2M".
@@ -1294,6 +1633,24 @@ function buildModel() {
   // AGENTS (live): běžící / dokončení async subagenti aktivní session
   const agents = activeSession ? readSessionAgents(activeSession, true) : [];
 
+  // TASKS: hlídače na pozadí (Monitor). Na rozdíl od Agents/Tools se NEomezují na
+  // sledovanou session — hlídač na PR běží na pozadí a chceš o něm vědět, i když
+  // jsi zrovna přepnutý jinam. Sbírá se tedy ze všech ŽIVÝCH session projektu
+  // (+ ze sledované, i kdyby doběhla). Persistent monitor umírá se svou session,
+  // takže stav běhu se bez informace o jejím životě určit nedá.
+  const liveMap = liveSessions();
+  const tasks = [];
+  for (const s of allSessions) {
+    const alive = liveMap ? liveMap.has(s.id) : s.live;
+    if (!alive && s.id !== activeSessionId) continue;
+    for (const t of readSessionTasks(s.file, alive)) {
+      // odkud hlídač je — null u sledované session, jinak titulek té cizí
+      tasks.push({ ...t, session: s.id === activeSessionId ? null : s.title });
+    }
+  }
+  // nejnovější spuštěné první; do skupin podle stavu je rozvrství až webview
+  tasks.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+
   // NOTIFICATIONS: hlášky hooků (systemMessage) aktivní session, bez zavřených
   const notifications = (activeSession ? visibleNotifications(activeSession) : []).map((n) => ({
     text: n.text,
@@ -1370,7 +1727,13 @@ function buildModel() {
   }));
 
   // jen odlehčená metadata pro picker (žádné dávky/tool výpisy)
-  const sessionList = allSessions.map((s) => ({ id: s.id, title: s.title, live: s.live, path: s.file }));
+  const sessionList = allSessions.map((s) => ({
+    id: s.id,
+    title: s.title,
+    live: s.live,
+    status: s.status, // 'busy' | 'idle' | null — rozlišení tečky v pickeru
+    path: s.file,
+  }));
 
   return {
     progress,
@@ -1379,6 +1742,7 @@ function buildModel() {
     plans,
     tools,
     agents,
+    tasks,
     notifications,
     usage,
     sessions: sessionList,
@@ -1680,11 +2044,22 @@ function activate(context) {
     watch(path.join(projectDir, 'memory'));
   }
   watch(PLANS_DIR);
+  watch(SESSIONS_DIR); // start/konec session a přechody busy↔idle
+
+  // Živost session je funkce BĚŽÍCÍCH PROCESŮ, ne obsahu souborů: proces může
+  // spadnout (kill -9) a svůj .json po sobě nechat, takže žádný zápis na disk
+  // takovou změnu neohlásí. Bez tikání by picker visel v posledním stavu —
+  // přesně ten bug, kdy přepínač zmizel teprve při nesouvisejícím překreslení.
+  const LIVENESS_TICK_MS = 30 * 1000;
+  const livenessTick = setInterval(() => {
+    webview.refresh();
+  }, LIVENESS_TICK_MS);
 
   context.subscriptions.push({
     dispose: () => {
       watchers.forEach((w) => w.close());
       if (livePoll) clearInterval(livePoll);
+      clearInterval(livenessTick);
     },
   });
 

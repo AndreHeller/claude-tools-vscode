@@ -295,6 +295,69 @@ body {
   font-style: italic;
 }
 
+/* ---------- Tasks (hlídače na pozadí) ---------- */
+
+.task {
+  padding: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 8px;
+}
+.task + .task {
+  margin-top: 6px;
+}
+.task .row {
+  padding: 2px 4px;
+}
+/* timeline událostí — zarovnaná pod popisek, ne pod ikonu */
+.task-events {
+  margin: 3px 4px 0 26px;
+  font-size: 0.9em;
+}
+.task-event {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  align-items: baseline;
+}
+/* čas v pevném sloupci, ať texty pod sebou lícují */
+.task-at {
+  flex: 0 0 auto;
+  min-width: 34px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.task-text {
+  flex: 1 1 auto;
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+.task-more,
+.task-quiet {
+  opacity: 0.5;
+  font-style: italic;
+  padding: 1px 0;
+}
+.task-warn {
+  margin: 1px 4px 0 26px;
+  font-size: 0.9em;
+  color: var(--vscode-charts-yellow, #cca700);
+  opacity: 0.9;
+}
+.task-running .ico {
+  color: var(--vscode-charts-blue, #4daafc);
+}
+.task-stale .ico {
+  color: var(--vscode-charts-yellow, #cca700);
+}
+.task-stopped .ico,
+.task-over .ico {
+  opacity: 0.6;
+}
+.task-stopped .lbl,
+.task-over .lbl {
+  opacity: 0.7;
+}
+
 /* context window bar (Usage) */
 .ctxbar {
   width: 100%;

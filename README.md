@@ -1,12 +1,13 @@
 # Claude Tools
 
-Read-only companion panel pro [Claude Code](https://github.com/anthropics/claude-code) ve VS Code. Přidává do sidebaru osm pohledů, inspirovaných widgetem ve web aplikaci claude.ai/code:
+Read-only companion panel pro [Claude Code](https://github.com/anthropics/claude-code) ve VS Code. Přidává do sidebaru devět pohledů, inspirovaných widgetem ve web aplikaci claude.ai/code:
 
 - **Notifications** — hlášky hooků (`systemMessage`) z aktivní session — to, co v terminálu vypíše třeba SessionStart hook („⚠ ~/.claude: 66 uncommitted souborů"), ale ve VS Code okně vidět není. Závažnost podle vodicího symbolu (`⚠` warning / `✗` error / jinak info), opakované hlášky (Stop hook každý turn, resume po reloadu) sbalené s počtem `N×`. Křížkem jde hlášku zavřít (transcript zůstává netknutý — zavřené klíče drží workspaceState). Sekce se zobrazí jen, když session nějaké nezavřené hlášky má. Čerstvé hlášky SessionStart hooků navíc vyskočí jako VS Code notifikace (toast) — jednou, staré session při startu extension netoastí.
 - **To Do Progress** — aktuální seznam úkolů (TodoWrite) z běžící session daného workspace, s ikonou stavu (`✓` hotovo / `↻` rozpracováno / `○` čeká) a souhrnem `X/Y` v hlavičce.
 - **To Do History** — historie todo dávek napříč všemi sessions projektu (jen sessions, které todo vytvořily), strukturovaná **Datum → Session → Dávka → úkoly**. Dávka = logicky uzavřený seznam (nová začíná, když se obsah úkolů kompletně vymění). Session má titulek z `aiTitle`, jinak z prvního promptu. Ukazuje i opuštěné/nedokončené dávky — věrně podle transcriptu.
 - **Tools** — co se v aktivní session použilo, u každé položky **počet volání** (`6×`): **Skills**, **Commands** (slash příkazy), **Built-in** (WebSearch/WebFetch), **Agents** (subagenti přes Task/Agent — odlišení `plugin` / `built-in` / `custom` podle `subagent_type`) a **MCP** servery + jejich tooly. Z `tool_use` bloků a `<command-name>` v transcriptu.
 - **Agents** — živí subagenti, které hlavní Claude spustil na pozadí (async Task/Agent): **běžící** se spinnerem a s tím, co právě dělají (`▸ Edit stg_deals.sql`), **dokončené** `✓`, **selhané** `✗` i s důvodem. Souhrn `X running · Y done` v hlavičce, každý agent jako orámovaná dlaždice. Panel se během běhu subagentů sám obnovuje (jejich postup se čte z výstupních transcriptů). Jen ve webview skinech (`cards` / `compact`).
+- **Tasks** — hlídače, které Claude pustil na pozadí (`Monitor`): shellová smyčka sledující vnější stav, typicky review a CI na pull requestu nebo doběh deploye. Na rozdíl od subagenta nekončí jedním výsledkem, ale hlásí se opakovaně — dlaždice proto nese **timeline událostí** s časy, jak je monitor postupně ohlásil. Jako jediná sekce se **neomezuje na sledovanou session**: hlídač běží na pozadí nezávisle na tom, ve které session zrovna jsi, takže se sbírá ze všech živých session projektu (u cizích je připsané `↗ <session>`). V hlavičce `X running · Y stale · Z done`, u každého hlídače interval (`á 60s`, vyčtený ze smyčky) a počet hlášení. Stavy: běží, **stale** (dlouho bez zápisu — odhad z jeho výstupního souboru, ne jistota), zastaven (`TaskStop`), vypršel (non-persistent po timeoutu) a ukončen se session (persistent monitor nepřežije session, ve které vznikl). Jen ve webview skinech (`cards` / `compact`).
 - **Usage** — model, **context window** (+ bar a `%`), a token totals (output / input + cache) ze `usage` bloků session. Limit okna řídí setting `claudeTools.contextWindow` (auto: Opus i Fable → 1M).
 - **Brain** — instrukce + paměť dělené podle scope:
   - **Personal** — `~/.claude/CLAUDE.md` (+ managed policy `/etc/claude-code/CLAUDE.md`, pokud existuje).
@@ -20,7 +21,7 @@ Klik na položku (soubor, skill) ho otevře; u session v To Do History jsou inli
 
 - **`cards`** (default) — webview, karty ve stylu cowork widgetu.
 - **`compact`** — webview, úsporný seznam (vše v jednom pohledu).
-- **`tree`** — nativní VS Code TreeView (sedm samostatných views, plná integrace, jednotlivé views lze rozmístit do víc panelů). Sekce **Agents** je jen ve webview skinech.
+- **`tree`** — nativní VS Code TreeView (sedm samostatných views, plná integrace, jednotlivé views lze rozmístit do víc panelů). Sekce **Agents** a **Tasks** jsou jen ve webview skinech.
 
 Webview skiny sdílí stejnou datovou vrstvu jako TreeView; přepnutí je okamžité. V širokém kontejneru (dolní panel) se webview přeskládá do dlaždic.
 
@@ -37,11 +38,14 @@ Claude Code nemá veřejné API pro tahle data — extension čte přímo jeho i
 | To Do History | **všechny** `.jsonl` v projektové složce → todo dávky seskupené Datum → Session → Dávka |
 | Tools | aktivní `.jsonl` → `Skill` / `mcp__*` / `WebSearch…` / `Task`+`Agent` (`subagent_type`) tool_use + `<command-name>` (slash) |
 | Agents | aktivní `.jsonl` → `async_launched` výsledky + `<task-notification>` (běh/doběh) · živá akce z výstupního transcriptu agenta v `/tmp/…/tasks/*.output` |
+| Tasks | **všechny živé** `.jsonl` projektu → `Monitor` tool_use (popis, příkaz) + task id z věty `Monitor started (task …)` ve výsledku · události z `<task-notification>` s `<event>` · konec z `TaskStop` · tep z `/tmp/…/tasks/*.output`. Transcript je append-only, takže se po prvním načtení dočítá jen přírůstek. |
 | Usage | aktivní `.jsonl` → `usage` bloky assistant zpráv (context window, tokeny) |
 | Brain | `~/.claude/CLAUDE.md`, `/etc/claude-code/CLAUDE.md`, `<repo>/CLAUDE.md`, `<repo>/CLAUDE.local.md`, `…/memory/MEMORY.md` (+ fact soubory) |
 | Plans | `~/.claude/plans/*.md` (globální, titulek = první `#` heading) |
 
 „Aktivní" session = nejnovější (`mtime`) `.jsonl` v projektové složce.
+
+„Živá" session (pro přepínač souběžných session) = **běží její proces**, ne že nedávno zapsala do transcriptu. Zdrojem je `~/.claude/sessions/<pid>.json` (`sessionId`, `cwd`, `status: busy | idle`); PID se ověřuje, protože soubory po spadlých procesech ve složce zůstávají. Session, ve které Claude čeká na vstup, tedy zůstává živá, i když do transcriptu dlouho nepíše. Tečka v přepínači: `●` pracuje, `○` čeká na vstup, `◌` už neběží (jen dosledovávaná). Bez složky `sessions/` (starší Claude Code) padá detekce zpět na mtime v okně 10 minut.
 
 Cesta projektové složky vzniká nahrazením `/` za `-` v absolutní cestě workspace.
 

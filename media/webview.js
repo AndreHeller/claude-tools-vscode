@@ -105,6 +105,8 @@
   // Přepínač session — jen když projekt běží ve víc session NARÁZ (2+ živé).
   // Archiv session sem nepatří (na ten je tlačítko Select Session → QuickPick).
   // Volba zafixuje (sticky) sledovanou session pro Progress / Tools / Usage.
+  // „Živá" = běží její proces (~/.claude/sessions/<pid>.json), ne že nedávno
+  // zapsala do transcriptu — session, kde Claude čeká na tvůj vstup, je živá taky.
   function renderSessionPicker() {
     const list = model.sessions || [];
     const active = model.activeSessionId;
@@ -116,7 +118,8 @@
       .map((s) => {
         // v auto režimu je vybraná položka „Auto", ne konkrétní session
         const sel = selected != null && s.id === selected ? ' selected' : '';
-        const dot = s.live ? '● ' : '○ ';
+        // ● pracuje · ○ čeká na vstup · ◌ už neběží (jen dosledovávaná)
+        const dot = !s.live ? '◌ ' : s.status === 'busy' ? '● ' : '○ ';
         return '<option value="' + esc(s.id) + '"' + sel + '>' + dot + esc(s.title) + '</option>';
       })
       .join('');
@@ -352,6 +355,91 @@
     return model.plans.map(fileRow).join('');
   }
 
+  // Hlídače na pozadí (Monitor): na rozdíl od subagenta nekončí jedním výsledkem,
+  // ale hlásí se opakovaně — proto je těžiště dlaždice timeline událostí.
+  const TASK_EVENTS_SHOWN = 6;
+
+  function fmtClock(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  function fmtDur(ms) {
+    if (!ms || ms < 0) return '';
+    const min = Math.round(ms / 60000);
+    if (min < 1) return 'míň než min';
+    if (min < 60) return min + ' min';
+    const h = Math.floor(min / 60);
+    const rest = min % 60;
+    return rest ? h + ' h ' + rest + ' min' : h + ' h';
+  }
+
+  function renderTasks() {
+    const list = model.tasks || [];
+    if (!list.length) return '<div class="empty-hint">No background monitors in this session.</div>';
+    const rank = { running: 0, stopped: 1, expired: 2, ended: 3 };
+    const sorted = list.slice().sort((a, b) => (rank[a.status] ?? 4) - (rank[b.status] ?? 4));
+    const st = {
+      running: { ico: 'pulse', cls: 'task-running' },
+      stopped: { ico: 'debug-stop', cls: 'task-stopped' },
+      expired: { ico: 'watch', cls: 'task-over' },
+      ended: { ico: 'circle-slash', cls: 'task-over' },
+    };
+    const now = Date.now();
+    return (
+      '<div class="task-list">' +
+      sorted
+        .map((t) => {
+          let s = st[t.status] || st.ended;
+          if (t.status === 'running' && t.stale) s = { ico: 'warning', cls: 'task-stale' };
+          // meta: jak dlouho hlídá · jak často · kolik toho nahlásil.
+          // U stale se doba běhu vynechává — „běží 72 h" u mrtvého hlídače lže.
+          const parts = [];
+          if (t.status === 'running' && !t.stale && t.startedAt) parts.push(fmtDur(now - t.startedAt));
+          if (t.interval) parts.push('á ' + t.interval + 's');
+          if (t.events.length) parts.push(t.events.length + '×');
+          // hlídač z jiné session než sledované — ať je jasné, odkud je
+          if (t.session) parts.push('↗ ' + t.session);
+          const shown = t.events.slice(-TASK_EVENTS_SHOWN);
+          const hidden = t.events.length - shown.length;
+          const more = hidden > 0 ? '<div class="task-more">+ ' + hidden + ' starších</div>' : '';
+          const timeline = t.events.length
+            ? '<div class="task-events">' +
+              more +
+              shown
+                .map(
+                  (e) =>
+                    '<div class="task-event"><span class="task-at">' +
+                    esc(fmtClock(e.at)) +
+                    '</span><span class="task-text">' +
+                    esc(e.text.replace(/\s*\n+\s*/g, ' · ')) +
+                    '</span></div>'
+                )
+                .join('') +
+              '</div>'
+            : '<div class="task-events task-quiet">zatím nic nehlásil</div>';
+          // stale je odhad z toho, kdy monitor naposled zapsal — ne jistota
+          const quiet = t.stale ? fmtDur(now - (t.lastBeat || t.startedAt)) : '';
+          const warn = t.stale
+            ? '<div class="task-warn">bez tepu ' + esc(quiet) + ' — nejspíš už neběží</div>'
+            : '';
+          return (
+            '<div class="task ' + s.cls + '">' +
+            '<div class="row"><span class="ico codicon codicon-' + s.ico + '"></span>' +
+            '<span class="lbl">' + esc(t.description) + '</span>' +
+            (parts.length ? '<span class="meta">' + esc(parts.join(' · ')) + '</span>' : '') +
+            '</div>' +
+            warn +
+            timeline +
+            '</div>'
+          );
+        })
+        .join('') +
+      '</div>'
+    );
+  }
+
   function section(title, key, bodyHtml, meta) {
     const open = isOpen(key);
     const metaHtml = meta ? '<span class="meta">' + esc(meta) + '</span>' : '';
@@ -398,6 +486,18 @@
     if (!hidden.has('history')) secs.push(section('To Do History', 'sec:history', renderHistory()));
     if (!hidden.has('tools')) secs.push(section('Tools', 'sec:tools', renderTools()));
     if (!hidden.has('agents')) secs.push(agentsSection); // '' když session nemá agenty
+    // Tasks jen když v session nějaký monitor byl (stejně jako Agents).
+    const tasks = model.tasks || [];
+    if (!hidden.has('tasks') && tasks.length) {
+      const running = tasks.filter((t) => t.status === 'running' && !t.stale).length;
+      const stale = tasks.filter((t) => t.status === 'running' && t.stale).length;
+      const over = tasks.length - running - stale;
+      const tParts = [];
+      if (running) tParts.push(running + ' running');
+      if (stale) tParts.push(stale + ' stale');
+      if (over) tParts.push(over + ' done');
+      secs.push(section('Tasks', 'sec:tasks', renderTasks(), tParts.join(' · ')));
+    }
     if (!hidden.has('usage')) secs.push(section('Usage', 'sec:usage', renderUsage()));
     if (!hidden.has('brain')) secs.push(section('Brain', 'sec:context', renderContext()));
     if (!hidden.has('plans')) secs.push(section('Plans', 'sec:plans', renderPlans()));

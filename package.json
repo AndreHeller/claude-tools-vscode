@@ -2,7 +2,7 @@
   "name": "claude-tools",
   "displayName": "Claude Tools",
   "description": "Read-only companion panel pro Claude Code — Progress (TodoWrite), Memory a Plans přímo v sidebaru VS Code.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "AndreHeller",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -108,13 +108,14 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["notifications", "progress", "history", "tools", "agents", "usage", "brain", "plans"],
+            "enum": ["notifications", "progress", "history", "tools", "agents", "tasks", "usage", "brain", "plans"],
             "enumDescriptions": [
               "Notifications (hook messages)",
               "To Do Progress",
               "To Do History",
               "Tools",
               "Agents (live subagents)",
+              "Tasks (background monitors)",
               "Usage",
               "Brain",
               "Plans"
