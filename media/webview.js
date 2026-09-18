@@ -9,17 +9,25 @@
 
   const saved = vscode.getState();
   const collapsed = new Set(saved && saved.collapsed ? saved.collapsed : []);
+  // Skupiny, které jsou zavřené, dokud je někdo sám neotevře. Nejde to řešit přes
+  // seed() — ten proběhne jednou za život panelu, takže u dřív nainstalované
+  // verze se nový klíč do `collapsed` nikdy nedostane a archiv by zůstal otevřený.
+  const DEFAULT_CLOSED = new Set(['t:tasks:hist']);
+  const isDefaultClosed = (key) => DEFAULT_CLOSED.has(key) || key.startsWith('t:task:');
+  const opened = new Set(saved && saved.opened ? saved.opened : []);
   if (saved && saved.seeded) seeded = true;
 
   function persist() {
-    vscode.setState({ collapsed: [...collapsed], seeded: true });
+    vscode.setState({ collapsed: [...collapsed], opened: [...opened], seeded: true });
   }
   function isOpen(key) {
+    if (isDefaultClosed(key)) return opened.has(key);
     return !collapsed.has(key);
   }
   function toggle(key) {
-    if (collapsed.has(key)) collapsed.delete(key);
-    else collapsed.add(key);
+    const set = isDefaultClosed(key) ? opened : collapsed;
+    if (set.has(key)) set.delete(key);
+    else set.add(key);
     persist();
     render();
   }
@@ -375,69 +383,71 @@
     return rest ? h + ' h ' + rest + ' min' : h + ' h';
   }
 
+  // Dlaždice jednoho hlídače: hlavička se vejde na řádek, hlášení jsou uvnitř
+  // a rozbalí se klikem — u hlídače, který běží hodiny, by jinak seznam utekl.
+  function taskTile(t, st) {
+    const look = st[t.status] || st.ended;
+    const now = Date.now();
+    // hlavička: jak dlouho běží · kolik nahlásil · kdy skončí
+    const head = [];
+    if (t.status === 'running' && t.startedAt) head.push(fmtDur(now - t.startedAt));
+    if (t.events.length) head.push(t.events.length + '×');
+    if (t.status === 'running') {
+      if (t.expiresAt) head.push(t.expiresAt > now ? 'vyprší za ' + fmtDur(t.expiresAt - now) : 'vyprší');
+      else if (t.persistent) head.push('do konce session');
+    }
+    // podrobnosti dovnitř, ať hlavička zůstane krátká
+    const sub = [];
+    if (t.interval) sub.push('á ' + t.interval + 's');
+    if (t.session) sub.push('↗ ' + t.session);
+    const subLine = sub.length ? '<div class="task-src">' + esc(sub.join(' · ')) + '</div>' : '';
+    const shown = t.events.slice(-TASK_EVENTS_SHOWN);
+    const hidden = t.events.length - shown.length;
+    const more = hidden > 0 ? '<div class="task-more">+ ' + hidden + ' starších</div>' : '';
+    const timeline = t.events.length
+      ? '<div class="task-events">' +
+        more +
+        shown
+          .map(
+            (e) =>
+              '<div class="task-event"><span class="task-at">' +
+              esc(fmtClock(e.at)) +
+              '</span><span class="task-text">' +
+              esc(e.text.replace(/\s*\n+\s*/g, ' · ')) +
+              '</span></div>'
+          )
+          .join('') +
+        '</div>'
+      : '<div class="task-events task-quiet">zatím nic nehlásil</div>';
+    const hdr =
+      '<span class="ico codicon codicon-' + look.ico + '"></span>' +
+      '<span class="lbl">' + esc(t.description) + '</span>' +
+      (head.length ? '<span class="meta">' + esc(head.join(' · ')) + '</span>' : '');
+    return '<div class="task ' + look.cls + '">' + group('t:task:' + t.id, hdr, subLine + timeline) + '</div>';
+  }
+
+  // Hlídače na pozadí (Monitor). Nahoře jen ty, co OPRAVDU běží — doběhlé a ty
+  // bez tepu jsou pod sbalenou historií, jinak se to, co běží, ztratí v archivu.
   function renderTasks() {
     const list = model.tasks || [];
-    if (!list.length) return '<div class="empty-hint">No background monitors in this session.</div>';
-    const rank = { running: 0, stopped: 1, expired: 2, ended: 3 };
-    const sorted = list.slice().sort((a, b) => (rank[a.status] ?? 4) - (rank[b.status] ?? 4));
     const st = {
       running: { ico: 'pulse', cls: 'task-running' },
       stopped: { ico: 'debug-stop', cls: 'task-stopped' },
       expired: { ico: 'watch', cls: 'task-over' },
       ended: { ico: 'circle-slash', cls: 'task-over' },
     };
-    const now = Date.now();
-    return (
-      '<div class="task-list">' +
-      sorted
-        .map((t) => {
-          let s = st[t.status] || st.ended;
-          if (t.status === 'running' && t.stale) s = { ico: 'warning', cls: 'task-stale' };
-          // meta: jak dlouho hlídá · jak často · kolik toho nahlásil.
-          // U stale se doba běhu vynechává — „běží 72 h" u mrtvého hlídače lže.
-          const parts = [];
-          if (t.status === 'running' && !t.stale && t.startedAt) parts.push(fmtDur(now - t.startedAt));
-          if (t.interval) parts.push('á ' + t.interval + 's');
-          if (t.events.length) parts.push(t.events.length + '×');
-          // hlídač z jiné session než sledované — ať je jasné, odkud je
-          if (t.session) parts.push('↗ ' + t.session);
-          const shown = t.events.slice(-TASK_EVENTS_SHOWN);
-          const hidden = t.events.length - shown.length;
-          const more = hidden > 0 ? '<div class="task-more">+ ' + hidden + ' starších</div>' : '';
-          const timeline = t.events.length
-            ? '<div class="task-events">' +
-              more +
-              shown
-                .map(
-                  (e) =>
-                    '<div class="task-event"><span class="task-at">' +
-                    esc(fmtClock(e.at)) +
-                    '</span><span class="task-text">' +
-                    esc(e.text.replace(/\s*\n+\s*/g, ' · ')) +
-                    '</span></div>'
-                )
-                .join('') +
-              '</div>'
-            : '<div class="task-events task-quiet">zatím nic nehlásil</div>';
-          // stale je odhad z toho, kdy monitor naposled zapsal — ne jistota
-          const quiet = t.stale ? fmtDur(now - (t.lastBeat || t.startedAt)) : '';
-          const warn = t.stale
-            ? '<div class="task-warn">bez tepu ' + esc(quiet) + ' — nejspíš už neběží</div>'
-            : '';
-          return (
-            '<div class="task ' + s.cls + '">' +
-            '<div class="row"><span class="ico codicon codicon-' + s.ico + '"></span>' +
-            '<span class="lbl">' + esc(t.description) + '</span>' +
-            (parts.length ? '<span class="meta">' + esc(parts.join(' · ')) + '</span>' : '') +
-            '</div>' +
-            warn +
-            timeline +
-            '</div>'
-          );
-        })
-        .join('') +
-      '</div>'
-    );
+    const live = list.filter((t) => t.status === 'running');
+    const past = list.filter((t) => t.status !== 'running');
+    let html = live.length
+      ? live.map((t) => taskTile(t, st)).join('')
+      : '<div class="empty-hint">Právě nic nehlídá.</div>';
+    if (past.length) {
+      const hdr =
+        '<span class="ico codicon codicon-history"></span><span class="lbl">Historie</span>' +
+        '<span class="meta">' + past.length + '</span>';
+      html += group('t:tasks:hist', hdr, past.map((t) => taskTile(t, st)).join(''));
+    }
+    return '<div class="task-list">' + html + '</div>';
   }
 
   function section(title, key, bodyHtml, meta) {
@@ -489,14 +499,8 @@
     // Tasks jen když v session nějaký monitor byl (stejně jako Agents).
     const tasks = model.tasks || [];
     if (!hidden.has('tasks') && tasks.length) {
-      const running = tasks.filter((t) => t.status === 'running' && !t.stale).length;
-      const stale = tasks.filter((t) => t.status === 'running' && t.stale).length;
-      const over = tasks.length - running - stale;
-      const tParts = [];
-      if (running) tParts.push(running + ' running');
-      if (stale) tParts.push(stale + ' stale');
-      if (over) tParts.push(over + ' done');
-      secs.push(section('Tasks', 'sec:tasks', renderTasks(), tParts.join(' · ')));
+      const running = tasks.filter((t) => t.status === 'running').length;
+      secs.push(section('Tasks', 'sec:tasks', renderTasks(), running ? running + ' running' : ''));
     }
     if (!hidden.has('usage')) secs.push(section('Usage', 'sec:usage', renderUsage()));
     if (!hidden.has('brain')) secs.push(section('Brain', 'sec:context', renderContext()));

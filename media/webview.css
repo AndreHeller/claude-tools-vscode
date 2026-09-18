@@ -305,12 +305,38 @@ body {
 .task + .task {
   margin-top: 6px;
 }
-.task .row {
-  padding: 2px 4px;
+.task .ghdr {
+  padding: 3px 4px;
+}
+/* tělo dlaždice odsazené pod popisek, ne pod caret */
+.task .gbody {
+  margin-left: 4px;
+}
+/* Popis musí dostat zbylé místo. Bez toho ho `meta` (flex:none) smrskne na nulu
+   a z dlaždice zbude jen ikona s údaji — hlídač pak nejde poznat. */
+.task .ghdr .lbl {
+  flex: 1 1 auto;
+}
+/* z které session hlídač je — vlastní řádek, titulky session bývají dlouhé */
+.task-src {
+  margin: 2px 4px 2px 22px;
+  font-size: 0.9em;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* archiv uvnitř dlaždicového seznamu — odsazení hlavičky na úroveň dlaždic */
+.task-list .group > .ghdr {
+  padding: 4px;
+  opacity: 0.75;
+}
+.task-list .group {
+  margin-top: 6px;
 }
 /* timeline událostí — zarovnaná pod popisek, ne pod ikonu */
 .task-events {
-  margin: 3px 4px 0 26px;
+  margin: 2px 4px 2px 22px;
   font-size: 0.9em;
 }
 .task-event {
@@ -337,17 +363,8 @@ body {
   font-style: italic;
   padding: 1px 0;
 }
-.task-warn {
-  margin: 1px 4px 0 26px;
-  font-size: 0.9em;
-  color: var(--vscode-charts-yellow, #cca700);
-  opacity: 0.9;
-}
 .task-running .ico {
   color: var(--vscode-charts-blue, #4daafc);
-}
-.task-stale .ico {
-  color: var(--vscode-charts-yellow, #cca700);
 }
 .task-stopped .ico,
 .task-over .ico {

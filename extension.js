@@ -647,13 +647,54 @@ function readSessionAgents(sessionFile, includeActions) {
 // POZOR: tentýž event je v transcriptu několikrát (queue-operation při zařazení
 // i vyřízení, attachment `queued_command`, user zpráva) — nutná deduplikace.
 
-const MONITOR_START_RE = /Monitor started \(task ([a-z0-9]+)(?:,\s*([^)]*))?\)/;
+const MONITOR_START_RE = /Monitor started \(task ([A-Za-z0-9]+)(?:,\s*([^)]*))?\)/;
 // Stejný text po delší pauze = nová událost, ne přepis téže — viz dedup níž.
 const TASK_EVENT_DEDUP_MS = 120 * 1000;
 // Bez tepu déle než násobek intervalu → monitor je nejspíš po smrti (měkký odhad).
-const TASK_STALE_FACTOR = 3;
-// Když interval neznáme (smyčka je ve skriptu, co už nemáme), platí tenhle strop.
-const TASK_STALE_FALLBACK_MS = 15 * 60 * 1000;
+// Otisk hlídače pro hledání v `ps`: nejdelší řádek jeho příkazu, který projde
+// beze změny do výpisu procesů. Apostrofy a nové řádky Claude Code při spouštění
+// escapuje ('\'' → '"'"', \n → \012), diakritika se v ps nemusí shodovat, a
+// řádek s `cd` sedí na kdeco — takové řádky se přeskakují.
+function monitorFingerprint(command) {
+  if (typeof command !== 'string') return null;
+  let best = '';
+  for (const raw of command.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('cd ')) continue;
+    if (/['\\]/.test(line) || /[^\x20-\x7E]/.test(line)) continue;
+    if (line.length > best.length) best = line;
+  }
+  best = best.slice(0, 60);
+  return best.length >= 12 ? best : null;
+}
+
+// Seznam běžících procesů (celé příkazové řádky). Cache, ať se `ps` nespouští
+// při každém překreslení panelu.
+const PS_CACHE_MS = 3000;
+let _psCache = { at: 0, text: null };
+function processList() {
+  const now = Date.now();
+  if (_psCache.text !== null && now - _psCache.at < PS_CACHE_MS) return _psCache.text;
+  let text = null;
+  try {
+    // -ww = neořezávat příkaz podle šířky terminálu
+    text = require('child_process').execFileSync('ps', ['-ewwo', 'command='], {
+      encoding: 'utf8',
+      timeout: 2000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch {
+    text = null; // ps není k mání — o běhu pak nic netvrdíme
+  }
+  _psCache = { at: now, text };
+  return text;
+}
+
+// POZN.: dřív se tu z mlčení monitoru usuzovalo, že doběhl. Je to opačně —
+// dobře napsaný hlídač hlásí jen ZMĚNY, takže ticho je jeho normální provoz a
+// mtime výstupního souboru je čas posledního hlášení, ne tep. Stav se proto
+// řídí jen tvrdými doklady konce: TaskStop, hláška Claude Code o vypršení,
+// vypršený vlastní timeout a konec session. Monitor zabitý zvenčí nepoznáme.
 
 // Z <task-notification> vytáhne událost monitoru (nemá <status> jako subagent).
 function parseTaskEvent(text) {
@@ -710,21 +751,6 @@ function monitorLifetime(mode) {
   return { persistent: false, ms: null };
 }
 
-// Výstupní soubor monitoru. Na rozdíl od subagenta ho tool_result nenese, takže
-// se skládá — kódovaná cesta projektu je rovnou názvem složky s transcriptem.
-function taskOutputFile(sessionFile, taskId) {
-  const encoded = path.basename(path.dirname(sessionFile));
-  const sessionId = path.basename(sessionFile, '.jsonl');
-  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-  const roots = [];
-  if (uid != null) roots.push(path.join('/tmp', 'claude-' + uid));
-  roots.push(path.join(os.tmpdir(), 'claude-' + uid));
-  for (const root of roots) {
-    const f = path.join(root, encoded, sessionId, 'tasks', taskId + '.output');
-    if (fs.existsSync(f)) return f;
-  }
-  return null;
-}
 
 // Syrový parse monitorů z transcriptu — bez stavu, který závisí na čase.
 // Cachuje se podle mtime+velikosti, protože Tasks se čtou ze VŠECH živých session
@@ -738,13 +764,14 @@ function emptyMonitorState() {
     byToolUse: new Map(), // tool_use_id -> vstup Monitoru (task id je až ve výsledku)
     events: new Map(), // taskId -> [{ at, text }]
     stopped: new Set(), // taskId, na který padl TaskStop
+    ended: new Map(), // taskId -> čas, kdy Claude Code ohlásil konec hlídání
   };
 }
 
 // Doplní stav o monitory z dalších řádků transcriptu. Je additivní, takže se dá
 // volat i jen na nově přibylý kus souboru.
 function parseMonitorLines(text, state) {
-  const { byId, byToolUse, events, stopped } = state;
+  const { byId, byToolUse, events, stopped, ended } = state;
   for (const line of text.split('\n')) {
     const hasMonitor = line.includes('Monitor');
     const hasNote = line.includes('<task-notification>');
@@ -773,11 +800,14 @@ function parseMonitorLines(text, state) {
           stopped.add(String(c.input.task_id));
         }
         // Výsledek se startovní větou → teprve tady se dozvíme task id.
-        if (c.type === 'tool_result') {
+        // Musí ale patřit ke KONKRÉTNÍMU Monitor tool_use: tutéž větu nese i
+        // výstup běžného příkazu, když si někdo transcript grepuje (tahle
+        // extension to dělá), a z takového textu by vznikl duch monitoru.
+        if (c.type === 'tool_result' && byToolUse.has(c.tool_use_id)) {
           const raw = typeof c.content === 'string' ? c.content : JSON.stringify(c.content || '');
           const m = raw.match(MONITOR_START_RE);
           if (m) {
-            const spec = byToolUse.get(c.tool_use_id) || { description: '', command: '', at: ts };
+            const spec = byToolUse.get(c.tool_use_id);
             const life = monitorLifetime(m[2]);
             byId.set(m[1], {
               id: m[1],
@@ -802,6 +832,14 @@ function parseMonitorLines(text, state) {
       for (const t of texts) {
         const e = parseTaskEvent(t);
         if (!e) continue;
+        // Hlášky v hranatých závorkách nejsou od hlídače, ale o něm: „[Monitor
+        // expired after 30m …]" je tvrdý doklad, že doběhl — lepší než dopočet
+        // z timeoutu. Do timeline nepatří, prázdné „[]" taky ne.
+        if (/^\[Monitor\b/.test(e.event)) {
+          if (ts && (!ended.has(e.id) || ts < ended.get(e.id))) ended.set(e.id, ts);
+          continue;
+        }
+        if (e.event === '[]') continue;
         const list = events.get(e.id) || [];
         // Dedup: tentýž text zapsaný několikrát v rámci jednoho doručení je jedna
         // událost; po delší pauze jde o nový výskyt (monitor hlásí stále stejné).
@@ -876,37 +914,33 @@ function cachedMonitors(sessionFile) {
 // Monitory jedné session: nejnovější spuštěné první, každý s timeline událostí.
 // sessionLive = běží ještě proces té session (persistent monitor s ní umírá).
 function readSessionTasks(sessionFile, sessionLive) {
-  const { byId, events, stopped } = cachedMonitors(sessionFile);
+  const { byId, events, stopped, ended } = cachedMonitors(sessionFile);
   const now = Date.now();
   const tasks = [...byId.values()].map((t) => {
     const list = (events.get(t.id) || []).sort((a, b) => (a.at || 0) - (b.at || 0));
     let status;
-    if (stopped.has(t.id)) status = 'stopped';
+    if (stopped.has(t.id)) status = 'stopped'; // explicitní TaskStop
+    else if (ended.has(t.id)) status = 'expired'; // Claude Code ohlásil konec hlídání
     else if (!sessionLive) status = 'ended'; // persistent monitor nepřežije svou session
     else if (t.lifetimeMs && t.startedAt && now > t.startedAt + t.lifetimeMs) status = 'expired';
-    else status = 'running';
-    let stale = false;
-    let lastBeat = null;
-    if (status === 'running') {
-      const out = taskOutputFile(sessionFile, t.id);
-      try {
-        if (out) lastBeat = fs.statSync(out).mtimeMs;
-      } catch {
-        /* soubor zmizel — ber jako bez tepu */
-      }
-      const last = lastBeat || t.startedAt;
-      const window = t.interval ? t.interval * 1000 * TASK_STALE_FACTOR : TASK_STALE_FALLBACK_MS;
-      if (last && now - last > window) stale = true;
+    else {
+      // Session žije a nic konec neohlásilo — což ale neznamená, že smyčka běží:
+      // umí odejít i bez oznámení. Poslední slovo má seznam procesů; když ps
+      // nemáme nebo otisk nejde získat, necháváme monitor běžet.
+      const fp = monitorFingerprint(t.command);
+      const ps = fp ? processList() : null;
+      status = fp && ps !== null && !ps.includes(fp) ? 'ended' : 'running';
     }
+
     return {
       id: t.id,
       description: t.description || 'Monitor ' + t.id,
       interval: t.interval,
       persistent: t.persistent,
       startedAt: t.startedAt,
+      // kdy hlídač sám skončí; null u persistent (ten drží až do konce session)
+      expiresAt: t.lifetimeMs && t.startedAt ? t.startedAt + t.lifetimeMs : null,
       status,
-      stale,
-      lastBeat, // poslední zápis monitoru; null = od startu nic nenapsal
       events: list.map((e) => ({ at: e.at, text: e.text })),
     };
   });
