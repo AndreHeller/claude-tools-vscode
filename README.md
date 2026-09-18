@@ -39,7 +39,7 @@ Claude Code nemá veřejné API pro tahle data — extension čte přímo jeho i
 | To Do Progress | aktivní `.jsonl` → poslední `tool_use` blok `TodoWrite` (posílá vždy celý seznam) |
 | To Do History | **všechny** `.jsonl` v projektové složce → todo dávky seskupené Datum → Session → Dávka |
 | Tools | aktivní `.jsonl` → `Skill` / `mcp__*` / `WebSearch…` / `Task`+`Agent` (`subagent_type`) tool_use + `<command-name>` (slash) |
-| Agents | aktivní `.jsonl` → `async_launched` výsledky + `<task-notification>` (běh/doběh) · živá akce z výstupního transcriptu agenta v `/tmp/…/tasks/*.output` |
+| Agents | aktivní `.jsonl` → `async_launched` výsledky + `<task-notification>` (běh/doběh) · **plus `<session>/subagents/*.meta.json`**, odkud se berou i agenti spuštění na popředí (ti v transcriptu žádný `async_launched` nezanechají) · živá akce z transcriptu agenta |
 | Tasks | **všechny živé** `.jsonl` projektu → `Monitor` tool_use (popis, příkaz) + task id z věty `Monitor started (task …)` ve výsledku · události z `<task-notification>` s `<event>` · konec z `TaskStop` a z hlášky o vypršení · jestli hlídač pořád běží, se ověřuje proti `ps`. Transcript je append-only, takže se po prvním načtení dočítá jen přírůstek. |
 | Usage | aktivní `.jsonl` → `usage` bloky assistant zpráv (context window, tokeny) |
 | Brain | `~/.claude/CLAUDE.md`, `/etc/claude-code/CLAUDE.md`, `<repo>/CLAUDE.md`, `<repo>/CLAUDE.local.md`, `…/memory/MEMORY.md` (+ fact soubory) |

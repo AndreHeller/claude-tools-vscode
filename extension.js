@@ -557,10 +557,46 @@ function agentActionLabel(c) {
 
 // Subagenti aktivní session: běžící + dokončení, chronologicky (nejnovější první).
 // includeActions=true → u běžících dočte poslední akci z jejich output transcriptu.
+// Metadata subagentů ze složky vedle transcriptu: <session>/subagents/*.meta.json.
+// Vznikají VŽDY — i pro agenty spuštěné na popředí, které v hlavním transcriptu
+// žádný `async_launched` výsledek nezanechají a dřív se tedy do panelu nedostali.
+// Klíčem je toolUseId, přes který se agent páruje s `tool_use` v transcriptu.
+function readSubagentMetas(sessionFile) {
+  const dir = sessionFile.replace(/\.jsonl$/, '') + '/subagents';
+  const out = new Map();
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.meta.json'));
+  } catch {
+    return out; // starší session složku nemá
+  }
+  for (const f of files) {
+    let d;
+    try {
+      d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (!d || !d.toolUseId) continue;
+    const jsonl = path.join(dir, f.replace(/\.meta\.json$/, '.jsonl'));
+    out.set(d.toolUseId, {
+      name: typeof d.agentType === 'string' ? d.agentType : 'claude',
+      description: typeof d.description === 'string' ? d.description : '',
+      foreground: d.requestShape === 'foreground',
+      transcript: fs.existsSync(jsonl) ? jsonl : null,
+    });
+  }
+  return out;
+}
+
 function readSessionAgents(sessionFile, includeActions) {
   const byId = new Map(); // agentId -> { id, name, description, model, outputFile, status, summary }
   const notes = new Map(); // agentId -> { status, summary }
   const byToolUse = new Map(); // tool_use_id -> subagent_type (z Agent tool_use)
+  const launchedAt = new Map(); // tool_use_id -> čas spuštění (pořadí ve výpisu)
+  const finished = new Set(); // tool_use_id, na který dorazil tool_result = agent doběhl
+  const asyncToolUse = new Set(); // tool_use_id agentů, kteří běží na pozadí
+  const metas = readSubagentMetas(sessionFile);
   let content;
   try {
     content = fs.readFileSync(sessionFile, 'utf8');
@@ -584,6 +620,12 @@ function readSessionAgents(sessionFile, includeActions) {
       for (const c of mc) {
         if (c && c.type === 'tool_use' && AGENT_TOOLS.has(c.name) && c.input) {
           if (typeof c.input.subagent_type === 'string') byToolUse.set(c.id, c.input.subagent_type);
+          launchedAt.set(c.id, r.timestamp ? Date.parse(r.timestamp) : null);
+        }
+        // Výsledek agenta v hlavním transcriptu = doběhl. U agenta na popředí je
+        // to jediný doklad konce, task-notification k němu žádná nepřijde.
+        if (c && c.type === 'tool_result' && c.tool_use_id && metas.has(c.tool_use_id)) {
+          finished.add(c.tool_use_id);
         }
       }
     }
@@ -595,8 +637,10 @@ function readSessionAgents(sessionFile, includeActions) {
         const res = mc.find((c) => c && c.type === 'tool_result' && c.tool_use_id);
         if (res) toolUseId = res.tool_use_id;
       }
+      if (toolUseId) asyncToolUse.add(toolUseId);
       byId.set(tur.agentId, {
         id: tur.agentId,
+        toolUseId,
         name: byToolUse.get(toolUseId) || 'claude',
         description: tur.description || '',
         model: tur.resolvedModel || null,
@@ -618,19 +662,59 @@ function readSessionAgents(sessionFile, includeActions) {
       }
     }
   }
-  // Slouč completion notifikace do agentů.
+  // Slouč completion notifikace do agentů běžících na pozadí.
   const agents = [...byId.values()].map((a) => {
     const n = notes.get(a.id);
-    if (n) return { ...a, status: n.status === 'completed' ? 'done' : n.status, summary: n.summary };
-    return a;
+    const at = a.toolUseId ? launchedAt.get(a.toolUseId) : null;
+    if (n) return { ...a, startedAt: at, status: n.status === 'completed' ? 'done' : n.status, summary: n.summary };
+    return { ...a, startedAt: at };
   });
+
+  // Agenti, po kterých v transcriptu žádný `async_launched` nezbyl — běželi na
+  // popředí a ví o nich jen jejich meta soubor.
+  const live = liveSessions();
+  const sessionId = path.basename(sessionFile, '.jsonl');
+  const sess = live ? live.get(sessionId) : null;
+  const sessionLive = live ? !!sess : true;
+  // Agent na popředí běží SYNCHRONNĚ uvnitř turnu, takže v session, která čeká
+  // na vstup uživatele (idle), běžet nemůže. Tohle je doklad, ne odhad z ticha.
+  const turnRunning = live ? !!sess && sess.status === 'busy' : true;
+  for (const [tuid, m] of metas) {
+    if (asyncToolUse.has(tuid)) continue; // ten už je ve výpisu z async větve
+    if (!byToolUse.has(tuid) && !launchedAt.has(tuid)) continue; // meta bez zadání v transcriptu
+    let status = 'running';
+    let summary = null;
+    if (finished.has(tuid)) status = 'done';
+    else if (!sessionLive) {
+      // Session skončila dřív, než výsledek dorazil — agent tedy neběží, ale ani
+      // nedoběhl. Tvrdit „hotovo" by bylo stejně nepravdivé jako „běží".
+      status = 'stopped';
+      summary = 'session skončila dřív, než dorazil výsledek';
+    } else if (m.foreground && !turnRunning) {
+      status = 'stopped';
+      summary = 'nedoběhl — výsledek do konverzace nedorazil';
+    }
+    agents.push({
+      id: tuid,
+      toolUseId: tuid,
+      name: m.name || byToolUse.get(tuid) || 'claude',
+      description: m.description,
+      model: null,
+      outputFile: m.transcript,
+      startedAt: launchedAt.get(tuid) || null,
+      status,
+      summary,
+    });
+  }
+
   // Live akce jen pro běžící (a jen když je vyžádáno).
   if (includeActions) {
     for (const a of agents) {
       if (a.status === 'running' && a.outputFile) a.action = readAgentLastAction(a.outputFile);
     }
   }
-  agents.reverse(); // nejnovější spuštěné první
+  // nejnovější spuštěné první; oba zdroje se tím promíchají správně
+  agents.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
   return agents;
 }
 
