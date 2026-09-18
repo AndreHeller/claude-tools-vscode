@@ -71,6 +71,7 @@ function liveSessions() {
       continue; // osiřelý .json po spadlém procesu
     }
     map.set(d.sessionId, {
+      pid: d.pid, // rodič hlídačů té session — viz monitorProcess()
       status: d.status === 'busy' ? 'busy' : 'idle',
       name: typeof d.name === 'string' ? d.name : null,
       cwd: typeof d.cwd === 'string' ? d.cwd : null,
@@ -668,26 +669,51 @@ function monitorFingerprint(command) {
   return best.length >= 12 ? best : null;
 }
 
-// Seznam běžících procesů (celé příkazové řádky). Cache, ať se `ps` nespouští
-// při každém překreslení panelu.
+// Tabulka běžících procesů. Cache, ať se `ps` nespouští při každém překreslení.
+// null = ps není k mání (jiná platforma, chyba) — pak o běhu nic netvrdíme.
 const PS_CACHE_MS = 3000;
-let _psCache = { at: 0, text: null };
-function processList() {
+let _psCache = { at: 0, rows: null };
+function invalidateProcessCache() {
+  _psCache = { at: 0, rows: null };
+}
+function processTable() {
   const now = Date.now();
-  if (_psCache.text !== null && now - _psCache.at < PS_CACHE_MS) return _psCache.text;
-  let text = null;
+  if (_psCache.rows !== null && now - _psCache.at < PS_CACHE_MS) return _psCache.rows;
+  let rows = null;
   try {
     // -ww = neořezávat příkaz podle šířky terminálu
-    text = require('child_process').execFileSync('ps', ['-ewwo', 'command='], {
+    const out = require('child_process').execFileSync('ps', ['-ewwo', 'pid=,ppid=,pgid=,command='], {
       encoding: 'utf8',
       timeout: 2000,
       maxBuffer: 8 * 1024 * 1024,
     });
+    rows = [];
+    for (const line of out.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\s\S]*)$/);
+      if (m) rows.push({ pid: +m[1], ppid: +m[2], pgid: +m[3], command: m[4] });
+    }
   } catch {
-    text = null; // ps není k mání — o běhu pak nic netvrdíme
+    rows = null;
   }
-  _psCache = { at: now, text };
-  return text;
+  _psCache = { at: now, rows };
+  return rows;
+}
+
+// Proces hlídače. Páruje se dvěma nezávislými znaky: musí být POTOMKEM procesu
+// té session (jeho PID je v ~/.claude/sessions/<pid>.json) a jeho příkaz musí
+// nést otisk hlídače. Samotný otisk by mohl sednout na cizí proces.
+// Vrací { known: false } když se to nedá rozhodnout — chybějící informace se
+// nesmí vydávat za doklad, že hlídač neběží.
+function monitorProcess(sessionId, command) {
+  const fp = monitorFingerprint(command);
+  if (!fp) return { known: false, proc: null };
+  const live = liveSessions();
+  const sess = live ? live.get(sessionId) : null;
+  if (!sess || !sess.pid) return { known: false, proc: null };
+  const rows = processTable();
+  if (!rows) return { known: false, proc: null };
+  const proc = rows.find((r) => r.ppid === sess.pid && r.command.includes(fp)) || null;
+  return { known: true, proc };
 }
 
 // POZN.: dřív se tu z mlčení monitoru usuzovalo, že doběhl. Je to opačně —
@@ -830,6 +856,13 @@ function parseMonitorLines(text, state) {
       if (typeof mc === 'string') texts.push(mc);
       else if (Array.isArray(mc)) for (const c of mc) if (c && typeof c.text === 'string') texts.push(c.text);
       for (const t of texts) {
+        // Notifikace se <status> místo <event> hlásí konec tasku (doběhl, spadl,
+        // byl zastaven) — druhý tvrdý doklad konce vedle hlášky o vypršení.
+        const fin = t.match(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/);
+        if (fin) {
+          const fid = fin[1].trim();
+          if (ts && (!ended.has(fid) || ts < ended.get(fid))) ended.set(fid, ts);
+        }
         const e = parseTaskEvent(t);
         if (!e) continue;
         // Hlášky v hranatých závorkách nejsou od hlídače, ale o něm: „[Monitor
@@ -916,20 +949,21 @@ function cachedMonitors(sessionFile) {
 function readSessionTasks(sessionFile, sessionLive) {
   const { byId, events, stopped, ended } = cachedMonitors(sessionFile);
   const now = Date.now();
+  const sessionId = path.basename(sessionFile, '.jsonl');
   const tasks = [...byId.values()].map((t) => {
     const list = (events.get(t.id) || []).sort((a, b) => (a.at || 0) - (b.at || 0));
     let status;
+    let proc = null; // proces hlídače, když se ho podařilo najít (→ dá se zastavit)
     if (stopped.has(t.id)) status = 'stopped'; // explicitní TaskStop
     else if (ended.has(t.id)) status = 'expired'; // Claude Code ohlásil konec hlídání
     else if (!sessionLive) status = 'ended'; // persistent monitor nepřežije svou session
     else if (t.lifetimeMs && t.startedAt && now > t.startedAt + t.lifetimeMs) status = 'expired';
     else {
       // Session žije a nic konec neohlásilo — což ale neznamená, že smyčka běží:
-      // umí odejít i bez oznámení. Poslední slovo má seznam procesů; když ps
-      // nemáme nebo otisk nejde získat, necháváme monitor běžet.
-      const fp = monitorFingerprint(t.command);
-      const ps = fp ? processList() : null;
-      status = fp && ps !== null && !ps.includes(fp) ? 'ended' : 'running';
+      // umí odejít i bez oznámení. Poslední slovo má seznam procesů.
+      const hit = monitorProcess(sessionId, t.command);
+      status = hit.known && !hit.proc ? 'ended' : 'running';
+      if (hit.proc) proc = hit.proc;
     }
 
     return {
@@ -940,6 +974,10 @@ function readSessionTasks(sessionFile, sessionLive) {
       startedAt: t.startedAt,
       // kdy hlídač sám skončí; null u persistent (ten drží až do konce session)
       expiresAt: t.lifetimeMs && t.startedAt ? t.startedAt + t.lifetimeMs : null,
+      // podklady pro zastavení: bez PID tlačítko nemá co dělat
+      pid: proc ? proc.pid : null,
+      pgid: proc ? proc.pgid : null,
+      procCommand: proc ? proc.command : null,
       status,
       events: list.map((e) => ({ at: e.at, text: e.text })),
     };
@@ -1839,6 +1877,13 @@ class ClaudeWebviewProvider {
       // msg.id může být null → zruší sticky výběr (zpět na nejnovější)
       setSelectedSessionId(msg.id || null);
       vscode.commands.executeCommand('claudePanel.refresh');
+    } else if (msg.type === 'killTask' && msg.pid) {
+      vscode.commands.executeCommand('claudePanel.killTask', {
+        pid: msg.pid,
+        pgid: msg.pgid || null,
+        description: msg.description || '',
+        command: msg.command || '',
+      });
     } else if (msg.type === 'dismissNotification' && msg.key) {
       vscode.commands.executeCommand('claudePanel.dismissNotification', msg.key);
     } else if (msg.type === 'delete' && msg.path) {
@@ -2029,6 +2074,31 @@ function activate(context) {
         );
         if (node.filePath) vscode.window.showTextDocument(vscode.Uri.file(node.filePath));
       }
+    }),
+    vscode.commands.registerCommand('claudePanel.killTask', async (arg) => {
+      if (!arg || !arg.pid) return;
+      const detail =
+        (arg.description ? arg.description + '\n\n' : '') +
+        'PID ' + arg.pid +
+        (arg.command ? '\n\n' + String(arg.command).slice(0, 400) : '');
+      const choice = await vscode.window.showWarningMessage(
+        'Zastavit hlídač?',
+        { modal: true, detail },
+        'Zastavit'
+      );
+      if (choice !== 'Zastavit') return;
+      try {
+        // Hlídač dostává vlastní process group, takže se dá ukončit i s tím, co
+        // zrovna spustil (gh, sleep). Zápornou hodnotou jen když je pgid opravdu
+        // jeho vlastní — jinak by šel signál cizí skupině.
+        if (arg.pgid && arg.pgid === arg.pid) process.kill(-arg.pgid, 'SIGTERM');
+        else process.kill(arg.pid, 'SIGTERM');
+      } catch (e) {
+        vscode.window.showErrorMessage(`Hlídač se nepodařilo zastavit: ${e.message}`);
+        return;
+      }
+      invalidateProcessCache();
+      refreshAll();
     }),
     vscode.commands.registerCommand('claudePanel.deleteFile', async (node) => {
       if (!node || !node.filePath) return;

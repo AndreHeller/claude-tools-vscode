@@ -308,6 +308,25 @@ body {
 .task .ghdr {
   padding: 3px 4px;
 }
+/* zastavení hlídače — zobrazí se až na hover dlaždice, ať nesvádí k prokliku */
+.task-kill {
+  display: none;
+  flex: none;
+  margin-left: 6px;
+  padding: 0 2px;
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  opacity: 0.7;
+  cursor: pointer;
+}
+.task:hover .task-kill {
+  display: inline-flex;
+}
+.task-kill:hover {
+  opacity: 1;
+  color: var(--vscode-errorForeground, #f14c4c);
+}
 /* tělo dlaždice odsazené pod popisek, ne pod caret */
 .task .gbody {
   margin-left: 4px;

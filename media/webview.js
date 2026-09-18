@@ -419,10 +419,21 @@
           .join('') +
         '</div>'
       : '<div class="task-events task-quiet">zatím nic nehlásil</div>';
+    // Zastavit jde jen hlídač, jehož proces se podařilo najít — bez PID by
+    // tlačítko nemělo co zabít.
+    const kill =
+      t.status === 'running' && t.pid
+        ? '<button class="task-kill" title="Zastavit hlídač" data-kill="' + esc(t.pid) + '"' +
+          ' data-kill-pgid="' + esc(t.pgid || '') + '"' +
+          ' data-kill-desc="' + esc(t.description) + '"' +
+          ' data-kill-cmd="' + esc(String(t.procCommand || '').slice(0, 400)) + '">' +
+          '<i class="codicon codicon-debug-stop"></i></button>'
+        : '';
     const hdr =
       '<span class="ico codicon codicon-' + look.ico + '"></span>' +
       '<span class="lbl">' + esc(t.description) + '</span>' +
-      (head.length ? '<span class="meta">' + esc(head.join(' · ')) + '</span>' : '');
+      (head.length ? '<span class="meta">' + esc(head.join(' · ')) + '</span>' : '') +
+      kill;
     return '<div class="task ' + look.cls + '">' + group('t:task:' + t.id, hdr, subLine + timeline) + '</div>';
   }
 
@@ -509,8 +520,20 @@
   }
 
   document.getElementById('root').addEventListener('click', (e) => {
-    const t = e.target.closest('[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle],[data-dismiss]');
+    const t = e.target.closest('[data-kill],[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle],[data-dismiss]');
     if (!t) return;
+    // musí být dřív než data-toggle — tlačítko sedí uvnitř skládací hlavičky
+    if (t.dataset.kill !== undefined) {
+      e.stopPropagation();
+      vscode.postMessage({
+        type: 'killTask',
+        pid: Number(t.dataset.kill),
+        pgid: t.dataset.killPgid ? Number(t.dataset.killPgid) : null,
+        description: t.dataset.killDesc || '',
+        command: t.dataset.killCmd || '',
+      });
+      return;
+    }
     if (t.dataset.skill !== undefined) {
       vscode.postMessage({ type: 'openSkill', name: t.dataset.skill });
       return;
