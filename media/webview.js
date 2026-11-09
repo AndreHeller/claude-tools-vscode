@@ -340,17 +340,64 @@
     return '<div class="agent-list">' + rows + '</div>';
   }
 
+  // Prompt cache: odpočet jen v posledních CACHE_WARN_MIN minutách a jen když by
+  // studený start stál aspoň CACHE_WARN_USD — údaj, který svítí pořád, časem nikdo
+  // nevnímá. Jinak tlumeně „warm · N min". Stejný práh $ drží extension.js (tree).
+  const CACHE_WARN_MIN = 25;
+  const CACHE_WARN_USD = 1;
+
+  function fmtClock(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function cacheRow(c, now) {
+    const left = c.expiresAt - now;
+    const cost = '~$' + c.coldUsd.toFixed(2);
+    const isPricey = c.coldUsd >= CACHE_WARN_USD;
+    const mins = Math.ceil(left / 60000);
+    let text;
+    let cls = '';
+    // texty krátké — sidebar bývá úzký; cena je celá v tooltipu
+    if (left <= 0) {
+      text = isPricey ? 'cold · next ' + cost : 'cold';
+      if (isPricey) cls = ' crit';
+    } else if (isPricey && mins <= CACHE_WARN_MIN) {
+      text = 'expires in ' + mins + ' min';
+      cls = mins <= 5 ? ' crit' : ' warn';
+    } else {
+      text = 'warm · ' + (mins >= 60 ? Math.floor(mins / 60) + ' h ' : '') + (mins % 60) + ' min';
+    }
+    const tip =
+      'Prompt cache (TTL ' + c.ttl + ') expires at ' + fmtClock(c.expiresAt) + '. ' +
+      'Next message re-sends ' + fmtTok(c.tokens) + ' tokens: ~$' + c.warmUsd.toFixed(2) +
+      ' while warm, ' + cost + ' once cold (API list price).';
+    return (
+      '<div class="row cache-row' + cls + '" title="' + esc(tip) + '">' +
+      '<span class="ico codicon codicon-watch"></span><span class="lbl">Prompt cache</span>' +
+      '<span class="meta">' + esc(text) + '</span></div>'
+    );
+  }
+
+  // Odpočet běží i bez změny na disku (session v klidu = žádný refresh z extension).
+  setInterval(() => {
+    const el = document.querySelector('.cache-row');
+    const c = model && model.usage && model.usage.cache;
+    if (el && c) el.outerHTML = cacheRow(c, Date.now());
+  }, 30000);
+
   function renderUsage() {
     const u = model.usage;
     if (!u) return '<div class="empty-hint">No usage data yet.</div>';
     const pct = u.limit ? Math.round((u.contextTokens / u.limit) * 100) : 0;
+    const level = pct >= 80 ? ' crit' : pct >= 50 ? ' warn' : '';
     return (
       (u.model
         ? '<div class="row"><span class="ico codicon codicon-chip"></span><span class="lbl">Model</span><span class="meta">' + esc(u.model) + '</span></div>'
         : '') +
       '<div class="row"><span class="ico codicon codicon-window"></span><span class="lbl">Context window</span>' +
       '<span class="meta">' + fmtTok(u.contextTokens) + ' / ' + fmtTok(u.limit) + ' · ' + pct + '%</span></div>' +
-      '<progress class="ctxbar" max="100" value="' + Math.min(100, pct) + '"></progress>' +
+      '<progress class="ctxbar' + level + '" max="100" value="' + Math.min(100, pct) + '"></progress>' +
+      (u.cache ? cacheRow(u.cache, Date.now()) : '') +
       '<div class="row"><span class="ico codicon codicon-arrow-up"></span><span class="lbl">Output</span>' +
       '<span class="meta">' + fmtTok(u.outputTotal) + '</span></div>' +
       '<div class="row"><span class="ico codicon codicon-arrow-down"></span><span class="lbl">Input (+cached)</span>' +
