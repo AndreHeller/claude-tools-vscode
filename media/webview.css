@@ -412,6 +412,25 @@ body {
   background: var(--vscode-charts-blue, #4daafc);
   border-radius: 3px;
 }
+/* zaplnění kontextu: od 50 % žlutá, od 80 % červená */
+.ctxbar.warn::-webkit-progress-value {
+  background: var(--vscode-charts-yellow, #e2c08d);
+}
+.ctxbar.crit::-webkit-progress-value {
+  background: var(--vscode-charts-red, #f14c4c);
+}
+
+/* prompt cache (Usage): zvýrazněná jen když vychladnutí něco stojí */
+.cache-row.warn .meta,
+.cache-row.warn .ico {
+  color: var(--vscode-charts-yellow, #e2c08d);
+  opacity: 1;
+}
+.cache-row.crit .meta,
+.cache-row.crit .ico {
+  color: var(--vscode-errorForeground, #f14c4c);
+  opacity: 1;
+}
 
 /* responsive: v širokém kontejneru (dolní panel) sekce jako dlaždice, ne sloupec.
    align-items: stretch (default) → karty v řádku jsou stejně vysoké, vyplní box. */
