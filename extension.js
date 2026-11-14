@@ -1078,53 +1078,64 @@ function fmtTokens(n) {
   return String(n);
 }
 
-// Ceník API v $/MTok (stav 10/2026): [model, základní vstup, čtení z cache].
+// Ceník API v $/MTok (stav 11/2026): [model, základní vstup, čtení z cache].
 // Zápis do cache stojí 2× základ při 1h TTL, 1,25× při 5min TTL. První shoda vyhrává.
 const CACHE_PRICES = [
+  [/fable-5-2|mythos-5-2/, 8, 0.2],
   [/fable-5-1|mythos-5-1/, 10, 0.25],
   [/fable|mythos/, 10, 1],
   [/opus-5-5/, 4, 0.2],
   [/opus/, 5, 0.5],
+  [/sonnet-5-5/, 2, 0.1],
   [/sonnet-5/, 2, 0.2],
   [/sonnet/, 3, 0.3],
   [/haiku-5/, 0.1, 0.01],
   [/haiku/, 1, 0.1],
 ];
+// Neznámý model → sazba Opus 5.5.
+const CACHE_PRICE_DEFAULT = CACHE_PRICES.find(([re]) => re.test('claude-opus-5-5'));
 
 // Prompt cache: kdy vychladne a kolik by stál studený start. Cache žije TTL od
-// ZAČÁTKU posledního požadavku (každé čtení ji obnoví). Začátek bereme z
-// `api-request` záznamu — ten ale zapisuje jen session z VS Code UI; v terminálu
-// je náhradou čas user záznamu (prompt / tool_result), který požadavek spustil.
+// ZAČÁTKU posledního požadavku (každé čtení ji obnoví). Začátek má dva zdroje:
+// `api-request` záznam (zapisuje ho jen session z VS Code UI a desktop appky)
+// a čas user záznamu (prompt / tool_result), který požadavek spustil. Platí
+// pozdější z nich: `api-request` zastará, když se session z UI obnoví
+// v terminálu, a o právě běžícím požadavku ví zase jen `api-request`.
 // TTL z `cacheControl` požadavku, jinak z rozpadu `usage.cache_creation`.
 function promptCacheInfo({ lines, lastUsageIdx, lastRequestIdx, ttl, model, tokens }) {
-  let requestAt = 0;
+  let apiAt = 0;
+  let apiTtl = null;
   if (lastRequestIdx >= 0) {
     try {
       const r = JSON.parse(lines[lastRequestIdx]);
-      requestAt = Date.parse(r.timestamp) || 0;
+      apiAt = Date.parse(r.timestamp) || 0;
       const cc = Array.isArray(r.cacheControl) ? r.cacheControl : [];
       const last = cc.length ? cc[cc.length - 1].value : null;
-      if (last && (last.ttl === '1h' || last.ttl === '5m')) ttl = last.ttl;
+      if (last && (last.ttl === '1h' || last.ttl === '5m')) apiTtl = last.ttl;
     } catch {
-      /* poškozený řádek — zkusí se náhrada níž */
+      /* poškozený řádek — zbude čas z user záznamu */
     }
   }
-  if (!requestAt && lastUsageIdx >= 0) {
+  let userAt = 0;
+  if (lastUsageIdx >= 0) {
     // jen pár řádků zpět, ať se neparsuje celý (velký) transcript
     for (let i = lastUsageIdx - 1; i >= Math.max(0, lastUsageIdx - 200); i--) {
       if (!lines[i].includes('"type":"user"')) continue;
       try {
         const r = JSON.parse(lines[i]);
-        if (r.type !== 'user' || r.isSidechain) continue;
-        requestAt = Date.parse(r.timestamp) || 0;
+        // shrnutí po kompakci nese čas shrnuté konverzace, ne požadavku
+        if (r.type !== 'user' || r.isSidechain || r.isCompactSummary) continue;
+        userAt = Date.parse(r.timestamp) || 0;
         break;
       } catch {
         continue;
       }
     }
   }
+  const requestAt = Math.max(apiAt, userAt);
+  if (apiTtl && apiAt >= userAt) ttl = apiTtl;
   if (!requestAt || !ttl || !tokens) return null;
-  const [, base, read] = CACHE_PRICES.find(([re]) => re.test(model || '')) || CACHE_PRICES[2];
+  const [, base, read] = CACHE_PRICES.find(([re]) => re.test(model || '')) || CACHE_PRICE_DEFAULT;
   const write = base * (ttl === '1h' ? 2 : 1.25);
   return {
     expiresAt: requestAt + (ttl === '1h' ? 3600 : 300) * 1000,
@@ -1172,6 +1183,9 @@ function readSessionUsage(sessionFile) {
     }
     const m = r.message;
     if (!m || m.role !== 'assistant' || !m.usage) continue;
+    // Syntetická zpráva (API chyba, přerušení) nemá skutečný turn ani model,
+    // jen nulové usage — přepsala by kontext na 0 a model na `<synthetic>`.
+    if (m.model === '<synthetic>') continue;
     const u = m.usage;
     model = m.model || model;
     outputTotal += u.output_tokens || 0;

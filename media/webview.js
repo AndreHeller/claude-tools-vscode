@@ -379,10 +379,16 @@
   }
 
   // Odpočet běží i bez změny na disku (session v klidu = žádný refresh z extension).
+  // Mění se jen text a třída — přepis celého řádku by každý tik zavřel otevřený tooltip.
   setInterval(() => {
     const el = document.querySelector('.cache-row');
     const c = model && model.usage && model.usage.cache;
-    if (el && c) el.outerHTML = cacheRow(c, Date.now());
+    if (!el || !c) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = cacheRow(c, Date.now());
+    const row = tmp.firstElementChild;
+    el.className = row.className;
+    el.querySelector('.meta').textContent = row.querySelector('.meta').textContent;
   }, 30000);
 
   function renderUsage() {
