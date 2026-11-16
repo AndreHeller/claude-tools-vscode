@@ -1078,6 +1078,74 @@ function fmtTokens(n) {
   return String(n);
 }
 
+// Ceník API v $/MTok (stav 11/2026): [model, základní vstup, čtení z cache].
+// Zápis do cache stojí 2× základ při 1h TTL, 1,25× při 5min TTL. První shoda vyhrává.
+const CACHE_PRICES = [
+  [/fable-5-2|mythos-5-2/, 8, 0.2],
+  [/fable-5-1|mythos-5-1/, 10, 0.25],
+  [/fable|mythos/, 10, 1],
+  [/opus-5-5/, 4, 0.2],
+  [/opus/, 5, 0.5],
+  [/sonnet-5-5/, 2, 0.1],
+  [/sonnet-5/, 2, 0.2],
+  [/sonnet/, 3, 0.3],
+  [/haiku-5/, 0.1, 0.01],
+  [/haiku/, 1, 0.1],
+];
+// Neznámý model → sazba Opus 5.5.
+const CACHE_PRICE_DEFAULT = CACHE_PRICES.find(([re]) => re.test('claude-opus-5-5'));
+
+// Prompt cache: kdy vychladne a kolik by stál studený start. Cache žije TTL od
+// ZAČÁTKU posledního požadavku (každé čtení ji obnoví). Začátek má dva zdroje:
+// `api-request` záznam (zapisuje ho jen session z VS Code UI a desktop appky)
+// a čas user záznamu (prompt / tool_result), který požadavek spustil. Platí
+// pozdější z nich: `api-request` zastará, když se session z UI obnoví
+// v terminálu, a o právě běžícím požadavku ví zase jen `api-request`.
+// TTL z `cacheControl` požadavku, jinak z rozpadu `usage.cache_creation`.
+function promptCacheInfo({ lines, lastUsageIdx, lastRequestIdx, ttl, model, tokens }) {
+  let apiAt = 0;
+  let apiTtl = null;
+  if (lastRequestIdx >= 0) {
+    try {
+      const r = JSON.parse(lines[lastRequestIdx]);
+      apiAt = Date.parse(r.timestamp) || 0;
+      const cc = Array.isArray(r.cacheControl) ? r.cacheControl : [];
+      const last = cc.length ? cc[cc.length - 1].value : null;
+      if (last && (last.ttl === '1h' || last.ttl === '5m')) apiTtl = last.ttl;
+    } catch {
+      /* poškozený řádek — zbude čas z user záznamu */
+    }
+  }
+  let userAt = 0;
+  if (lastUsageIdx >= 0) {
+    // jen pár řádků zpět, ať se neparsuje celý (velký) transcript
+    for (let i = lastUsageIdx - 1; i >= Math.max(0, lastUsageIdx - 200); i--) {
+      if (!lines[i].includes('"type":"user"')) continue;
+      try {
+        const r = JSON.parse(lines[i]);
+        // shrnutí po kompakci nese čas shrnuté konverzace, ne požadavku
+        if (r.type !== 'user' || r.isSidechain || r.isCompactSummary) continue;
+        userAt = Date.parse(r.timestamp) || 0;
+        break;
+      } catch {
+        continue;
+      }
+    }
+  }
+  const requestAt = Math.max(apiAt, userAt);
+  if (apiTtl && apiAt >= userAt) ttl = apiTtl;
+  if (!requestAt || !ttl || !tokens) return null;
+  const [, base, read] = CACHE_PRICES.find(([re]) => re.test(model || '')) || CACHE_PRICE_DEFAULT;
+  const write = base * (ttl === '1h' ? 2 : 1.25);
+  return {
+    expiresAt: requestAt + (ttl === '1h' ? 3600 : 300) * 1000,
+    ttl,
+    tokens,
+    coldUsd: (tokens / 1e6) * write,
+    warmUsd: (tokens / 1e6) * read,
+  };
+}
+
 // Usage aktivní session z `usage` bloků assistant záznamů.
 // Context window = input + cache_creation + cache_read posledního turnu.
 function readSessionUsage(sessionFile) {
@@ -1085,15 +1153,27 @@ function readSessionUsage(sessionFile) {
   let inputTotal = 0;
   let cacheReadTotal = 0;
   let contextTokens = 0;
+  let lastOutput = 0;
   let maxContext = 0;
   let model = null;
+  let ttl = null;
+  let lastUsageIdx = -1;
+  let lastRequestIdx = -1;
   let content;
   try {
     content = fs.readFileSync(sessionFile, 'utf8');
   } catch {
     return null;
   }
-  for (const line of content.split('\n')) {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // `type` je u těchto záznamů první klíč → startsWith místo druhého průchodu
+    // každým (i mnohamegovým) řádkem; parsuje se až ten poslední (promptCacheInfo)
+    if (line.startsWith('{"type":"api-request"')) {
+      lastRequestIdx = i;
+      continue;
+    }
     if (!line.includes('"usage"')) continue;
     let r;
     try {
@@ -1103,6 +1183,9 @@ function readSessionUsage(sessionFile) {
     }
     const m = r.message;
     if (!m || m.role !== 'assistant' || !m.usage) continue;
+    // Syntetická zpráva (API chyba, přerušení) nemá skutečný turn ani model,
+    // jen nulové usage — přepsala by kontext na 0 a model na `<synthetic>`.
+    if (m.model === '<synthetic>') continue;
     const u = m.usage;
     model = m.model || model;
     outputTotal += u.output_tokens || 0;
@@ -1111,7 +1194,12 @@ function readSessionUsage(sessionFile) {
     const ctx =
       (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
     contextTokens = ctx; // poslední turn = aktuální obsazení
+    lastOutput = u.output_tokens || 0;
     if (ctx > maxContext) maxContext = ctx;
+    if (!r.isSidechain) lastUsageIdx = i;
+    const cc = u.cache_creation || {};
+    if (cc.ephemeral_1h_input_tokens > 0) ttl = '1h';
+    else if (cc.ephemeral_5m_input_tokens > 0) ttl = '5m';
   }
   if (!model && !contextTokens) return null;
   // Limit nejde z modelu spolehlivě vyčíst (sufix [1m] v transcriptu není). Setting přebije.
@@ -1121,7 +1209,16 @@ function readSessionUsage(sessionFile) {
   if (cfg === '200000') limit = 200000;
   else if (cfg === '1000000') limit = 1000000;
   else limit = (model && /opus|fable/i.test(model)) || maxContext > 200000 ? 1000000 : 200000;
-  return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal };
+  // další požadavek znovu pošle celý kontext + poslední odpověď
+  const cache = promptCacheInfo({
+    lines,
+    lastUsageIdx,
+    lastRequestIdx,
+    ttl,
+    model,
+    tokens: contextTokens + lastOutput,
+  });
+  return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal, cache };
 }
 
 // ---------- parsování: hook hlášky (hook_system_message) ----------
@@ -1714,6 +1811,24 @@ class ToolsProvider extends BaseProvider {
   }
 }
 
+// Prahy jako webview (media/webview.js): kontext žlutý od 50 %, červený od 80 %;
+// cache zvýrazněná, jen když by studený start stál aspoň CACHE_WARN_USD.
+const CACHE_WARN_USD = 1;
+
+function ctxColor(pct) {
+  if (pct >= 80) return new vscode.ThemeColor('charts.red');
+  if (pct >= 50) return new vscode.ThemeColor('charts.yellow');
+  return undefined;
+}
+
+function cacheTooltip(c) {
+  return (
+    `Prompt cache (TTL ${c.ttl}) expires at ${fmtTime(c.expiresAt)}.\n` +
+    `Next message re-sends ${fmtTokens(c.tokens)} tokens: ` +
+    `~$${c.warmUsd.toFixed(2)} while warm, ~$${c.coldUsd.toFixed(2)} once cold (API list price).`
+  );
+}
+
 // Usage panel — context window + token totals aktivní session.
 class UsageProvider extends BaseProvider {
   getChildren(element) {
@@ -1736,8 +1851,24 @@ class UsageProvider extends BaseProvider {
       `Context: ${fmtTokens(u.contextTokens)} / ${fmtTokens(u.limit)} (${pct}%)`,
       LEAF
     );
-    ctx.iconPath = new vscode.ThemeIcon('window');
+    ctx.iconPath = new vscode.ThemeIcon('window', ctxColor(pct));
     items.push(ctx);
+    if (u.cache) {
+      // TreeView se neobnovuje časovačem → absolutní čas místo odpočtu (nezastará)
+      const c = u.cache;
+      const isCold = c.expiresAt <= Date.now();
+      const cost = `~$${c.coldUsd.toFixed(2)}`;
+      const label = isCold
+        ? `Cache: cold since ${fmtTime(c.expiresAt)} · next message ${cost}`
+        : `Cache: warm until ${fmtTime(c.expiresAt)} · cold start ${cost}`;
+      const cch = new vscode.TreeItem(label, LEAF);
+      cch.iconPath = new vscode.ThemeIcon(
+        'watch',
+        isCold && c.coldUsd >= CACHE_WARN_USD ? new vscode.ThemeColor('charts.red') : undefined
+      );
+      cch.tooltip = cacheTooltip(c);
+      items.push(cch);
+    }
     const out = new vscode.TreeItem(`Output: ${fmtTokens(u.outputTotal)} tokens`, LEAF);
     out.iconPath = new vscode.ThemeIcon('arrow-up');
     items.push(out);
