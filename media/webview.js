@@ -120,8 +120,12 @@
     const active = model.activeSessionId;
     const selected = model.selectedSessionId; // null = auto režim
     // živé + případně právě sledovaná (i když už doběhla), ať je vidět co sleduješ
-    const shown = list.filter((s) => s.live || s.id === active);
-    if (shown.length < 2) return '';
+    // Vybraná session musí v nabídce zůstat i po tom, co doběhne — jinak
+    // přepínač pod dvěma živými zmizí i s ní a není kudy se vrátit na Auto.
+    const shown = list.filter((s) => s.live || s.id === active || s.id === selected);
+    // Pod dvěma položkami nemá přepínač co nabízet, ale ve sticky režimu se
+    // schovat nesmí: zmizel by jediný ovladač, kterým jde fixace zrušit.
+    if (shown.length < 2 && selected == null) return '';
     const opts = shown
       .map((s) => {
         // v auto režimu je vybraná položka „Auto", ne konkrétní session
@@ -526,7 +530,44 @@
     );
   }
 
+  // Překreslení jde přes `root.innerHTML`, takže zahodí celý DOM — a s ním
+  // rozbalenou nabídku přepínače i focus. Dokud ji má uživatel otevřenou,
+  // stačilo cizí session něco zapsat a nabídka se pod rukama zavřela dřív,
+  // než stihl kliknout.
+  //
+  // Rozbalení nativního <select> se z JS zjistit nedá, proto se bere jako
+  // otevřený od `mousedown` / `focus` až po `change`, `blur` nebo Escape.
+  // Pojistkou je timeout: kdyby žádná z těch událostí nepřišla (uživatel
+  // nechá přepínač zafokusovaný a odejde), panel by se jinak zasekl.
+  const PICKER_HOLD_MS = 20000;
+  let pickerHold = false;
+  let pickerHoldTimer = null;
+  let renderPending = false;
+
+  function holdPicker() {
+    pickerHold = true;
+    clearTimeout(pickerHoldTimer);
+    pickerHoldTimer = setTimeout(releasePicker, PICKER_HOLD_MS);
+  }
+
+  function releasePicker() {
+    clearTimeout(pickerHoldTimer);
+    pickerHoldTimer = null;
+    if (!pickerHold) return;
+    pickerHold = false;
+    if (renderPending) {
+      renderPending = false;
+      render();
+    }
+  }
+
   function render() {
+    // Model už je uložený, takže odložené překreslení dožene poslední stav
+    // naráz — nefronti se, jen se zapamatuje, že je co dohnat.
+    if (pickerHold) {
+      renderPending = true;
+      return;
+    }
     const root = document.getElementById('root');
     document.body.className = 'skin-' + skin;
     if (!model) {
@@ -626,10 +667,28 @@
     }
   });
 
+  // Jakmile uživatel na přepínač sáhne, drž překreslování. `mousedown` kvůli
+  // myši (nabídka se rozbalí ještě před focusem), `focusin` kvůli klávesnici.
+  document.getElementById('root').addEventListener('mousedown', (e) => {
+    if (e.target.closest('#sessionSelect')) holdPicker();
+  });
+  document.getElementById('root').addEventListener('focusin', (e) => {
+    if (e.target.closest('#sessionSelect')) holdPicker();
+  });
+  document.getElementById('root').addEventListener('focusout', (e) => {
+    if (e.target.closest('#sessionSelect')) releasePicker();
+  });
+  document.getElementById('root').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && e.target.closest('#sessionSelect')) releasePicker();
+  });
+
   // Přepnutí sledované session přes dropdown (change, ne click).
   document.getElementById('root').addEventListener('change', (e) => {
     const sel = e.target.closest('#sessionSelect');
     if (!sel) return;
+    // Volba padla, nabídka je zavřená — pusť překreslení, ať se odložený
+    // stav dožene hned a nečeká se na blur.
+    releasePicker();
     vscode.postMessage({ type: 'selectSession', id: sel.value === '__auto__' ? null : sel.value });
   });
 
