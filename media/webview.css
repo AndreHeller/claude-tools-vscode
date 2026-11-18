@@ -292,6 +292,33 @@ body {
 .agent .row {
   padding: 2px 4px;
 }
+/* Dlaždice s detailem má řádek zabalený ve skládací hlavičce. Flexová položka
+   se ve výchozím stavu nesmí zúžit pod obsah, takže bez `min-width: 0` zůstane
+   na řádek pár pixelů a text se v úzkém panelu láme po písmenech. */
+.agent .ghdr > .row {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+
+/* Název drží místo, metadata ustupují. Bez `flex: 1` na názvu si metadata
+   („2× · vyprší za 30 min", typ agenta) ukrojí, kolik potřebují, a v úzkém
+   panelu z názvu nezbude nic — přitom právě ten říká, o co jde. */
+.agent .ghdr .lbl,
+.monitor .ghdr .lbl,
+.server-tile .ghdr .lbl {
+  flex: 1;
+  min-width: 0;
+}
+.agent .ghdr .meta,
+.monitor .ghdr .meta,
+.server-tile .ghdr .meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* „právě dělá" / summary — druhý řádek, odsazený pod ikonu */
 .agent-action {
   margin: 1px 4px 0 26px;
@@ -363,6 +390,130 @@ body {
   background: var(--vscode-textBlockQuote-background);
   border-left: 2px solid var(--vscode-textBlockQuote-border);
   border-radius: 3px;
+}
+
+/* ---------- Usage: součty za session ---------- */
+.usage-sum-hdr {
+  margin: 6px 8px 2px;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+/* Nálepka „levné / drahé" sedí hned za popiskem, ne u čísla — váže se
+   k povaze položky, ne k její velikosti. */
+.usage-tag {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 0.78em;
+  opacity: 0.75;
+  font-family: var(--vscode-editor-font-family), monospace;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+.usage-sum .meta {
+  font-family: var(--vscode-editor-font-family), monospace;
+}
+/* Legenda k číslům. Nativní tooltip (`title`) se ve webview nezobrazí, takže
+   vysvětlení stojí přímo v panelu — sbalené, ať nepřekáží. */
+.usage-help {
+  padding: 2px 8px 6px 22px;
+  font-size: 0.9em;
+  line-height: 1.5;
+  opacity: 0.85;
+}
+.usage-help p {
+  margin: 0 0 6px;
+}
+.usage-help p:last-child {
+  margin-bottom: 0;
+}
+.usage-help b {
+  font-weight: 600;
+  opacity: 1;
+}
+.usage-help-note {
+  opacity: 0.65;
+  font-size: 0.95em;
+}
+
+/* ---------- Activity (agenti, hlídači a servery pohromadě) ---------- */
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Skupina uvnitř sekce: hlavička je tišší než sekce nad ní, aby bylo poznat,
+   která úroveň je která, a obsah je odsazený pod ni. */
+.subsection-hdr .lbl {
+  font-size: 0.92em;
+  opacity: 0.85;
+}
+.subsection > .gbody {
+  padding-left: 6px;
+}
+.subsection + .subsection {
+  margin-top: 2px;
+}
+
+/* ---------- Servers (dev servery na pozadí) ---------- */
+/* Stejná dlaždice jako u hlídačů — jsou to dvě varianty téhož: něco, co běží
+   na pozadí, dá se rozkliknout a zastavit. */
+.server-tile {
+  padding: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 8px;
+}
+.server-tile + .server-tile {
+  margin-top: 6px;
+}
+.server-tile .ghdr {
+  padding: 2px 4px;
+}
+.server-tile .ico {
+  color: var(--vscode-charts-green, #89d185);
+}
+.server-stopped .ico,
+.server-stopped .lbl {
+  opacity: 0.6;
+}
+.server-port-off {
+  font-family: var(--vscode-editor-font-family), monospace;
+  opacity: 0.5;
+}
+.server-cmd {
+  margin: 2px 4px 0 26px;
+  font-size: 0.9em;
+  opacity: 0.7;
+  font-family: var(--vscode-editor-font-family), monospace;
+  word-break: break-all;
+}
+.server-open {
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family), monospace;
+  font-size: 0.9em;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+.server-open:hover {
+  background: var(--vscode-button-hoverBackground);
+  color: var(--vscode-button-foreground);
+}
+/* Zastavení serveru vypadá i chová se jako u hlídače, jen visí na řádku
+   místo na dlaždici — proto vlastní pravidlo pro zobrazení na hover. */
+.server-tile .monitor-kill {
+  display: none;
+  flex: none;
+}
+.server-tile:hover .monitor-kill {
+  display: inline-flex;
 }
 
 /* ---------- Monitors (hlídače na pozadí) ---------- */

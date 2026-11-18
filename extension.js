@@ -849,6 +849,233 @@ function readSessionAgents(sessionFile, includeActions) {
   return agents;
 }
 
+// ---------- parsování: Servers (dev servery na pozadí) ----------
+
+// Porty, na kterých se opravdu poslouchá, indexované podle PID. `lsof` vrací
+// všechno na stroji, takže se výsledek páruje až proti stromu procesů session —
+// jinak by panel ukázal cizí Postgres jako „tvůj server".
+// null = lsof není k mání; pak se o portu netvrdí nic a bere se zadání.
+const LSOF_CACHE_MS = 3000;
+let _lsofCache = { at: 0, map: null };
+function listeningPorts() {
+  const now = Date.now();
+  if (_lsofCache.map !== null && now - _lsofCache.at < LSOF_CACHE_MS) return _lsofCache.map;
+  let map = null;
+  try {
+    const out = require('child_process').execFileSync(
+      'lsof',
+      ['-nP', '-iTCP', '-sTCP:LISTEN'],
+      { encoding: 'utf8', timeout: 2500, maxBuffer: 4 * 1024 * 1024 }
+    );
+    map = new Map();
+    for (const line of out.split('\n').slice(1)) {
+      const col = line.trim().split(/\s+/);
+      if (col.length < 9) continue;
+      const pid = +col[1];
+      const port = (col[8].match(/:(\d+)$/) || [])[1];
+      if (!pid || !port) continue;
+      if (!map.has(pid)) map.set(pid, new Set());
+      map.get(pid).add(+port);
+    }
+  } catch {
+    map = null; // lsof chybí nebo spadl
+  }
+  _lsofCache = { at: now, map };
+  return map;
+}
+
+// Celý podstrom procesu včetně kořene. Server často neposlouchá sám — `npm run
+// dev` nastartuje node, `uvicorn` si drží workery —, takže PID z Bash volání
+// na portu nesedí a hledat se musí i u potomků.
+function processSubtree(rootPid, rows) {
+  const deti = new Map();
+  for (const r of rows) {
+    if (!deti.has(r.ppid)) deti.set(r.ppid, []);
+    deti.get(r.ppid).push(r.pid);
+  }
+  const out = [];
+  const fronta = [rootPid];
+  const videl = new Set();
+  while (fronta.length) {
+    const pid = fronta.shift();
+    if (videl.has(pid)) continue; // pojistka proti cyklu v ps výstupu
+    videl.add(pid);
+    out.push(pid);
+    for (const d of deti.get(pid) || []) fronta.push(d);
+  }
+  return out;
+}
+
+// Port ze zadání. Používá se, když proces neběží nebo `lsof` nic nevrátil —
+// je to tvrzení autora příkazu, ne měření, takže má nižší váhu.
+// Databázové porty v proměnných (`…@localhost:55432/db`) se vynechávají:
+// zajímá nás port aplikace, ne její závislosti.
+function portFromCommand(command) {
+  if (typeof command !== 'string') return null;
+  // Pořadí je od nejjednoznačnějšího: explicitní přepínač porazí adresu
+  // v proměnné, protože ta může patřit databázi, ne aplikaci.
+  const vzory = [
+    /--port[= ](\d{2,5})/,
+    /--server\.port[= ](\d{2,5})/, // streamlit
+    /\s-p[= ](\d{2,5})\b/,
+    /\bPORT=(\d{2,5})/,
+    /\bhttp\.server\s+(\d{2,5})/, // python -m http.server 8000
+    /APP_BASE_URL=https?:\/\/[^\s:]+:(\d{2,5})/,
+    /0\.0\.0\.0:(\d{2,5})/,
+    /localhost:(\d{2,5})\b/,
+  ];
+  for (const v of vzory) {
+    const m = command.match(v);
+    if (m) {
+      const n = +m[1];
+      if (n > 0 && n < 65536) return n;
+    }
+  }
+  return null;
+}
+
+// Otisk serveru pro párování s procesem. Liší se od otisku hlídače tím, jak
+// zachází s `cd`: u hlídače je to samostatný přípravný řádek a zahazuje se
+// celý, kdežto server se běžně spouští jako `cd /nekam && uvicorn …` na jednom
+// řádku — tam se musí odříznout jen ta vedoucí část, ne řádek.
+function serverFingerprint(command) {
+  if (typeof command !== 'string') return null;
+  let best = '';
+  for (const raw of command.split('\n')) {
+    let line = raw.trim();
+    // `cd … &&` na začátku pryč, klidně několikrát za sebou
+    let predtim;
+    do {
+      predtim = line;
+      line = line.replace(/^cd\s+[^&;|]+(?:&&|;)\s*/, '').trim();
+    } while (line !== predtim);
+    if (!line || line.startsWith('cd ')) continue;
+    if (/[^\x20-\x7E]/.test(line)) continue; // ps vrací jen ASCII spolehlivě
+    if (line.length > best.length) best = line;
+  }
+  best = best.slice(0, 60);
+  return best.length >= 8 ? best : null;
+}
+
+// Servery spuštěné v téhle session, běžící i doběhlé. Doběhlý nese
+// `status: 'stopped'` — panel ho dá pod sbalenou historii stejně jako
+// u hlídačů, aby se všechny tři skupiny v Activity chovaly stejně.
+//
+// Co se za server považuje: příkaz spuštěný na pozadí (`Bash` s
+// `run_in_background`), jehož proces žije a poslouchá na portu. Čekací smyčky
+// a dávkové úlohy, kterých je na pozadí většina, tím vypadnou samy — žádný
+// seznam povolených příkazů se neudržuje.
+const _serverCache = new Map();
+function readSessionServers(sessionFile) {
+  let st;
+  try {
+    st = fs.statSync(sessionFile);
+  } catch {
+    return [];
+  }
+  const klic = st.mtimeMs + ':' + st.size;
+  const cached = _serverCache.get(sessionFile);
+  let zadani;
+  if (cached && cached.klic === klic) {
+    zadani = cached.zadani;
+  } else {
+    zadani = [];
+    let content;
+    try {
+      content = fs.readFileSync(sessionFile, 'utf8');
+    } catch {
+      return [];
+    }
+    const podleToolUse = new Map();
+    for (const line of content.split('\n')) {
+      if (!line.includes('run_in_background') && !line.includes('taskId')) continue;
+      let rec;
+      try {
+        rec = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const mc = rec.message && rec.message.content;
+      if (Array.isArray(mc)) {
+        for (const c of mc) {
+          if (c && c.type === 'tool_use' && c.name === 'Bash' && c.input && c.input.run_in_background) {
+            podleToolUse.set(c.id, {
+              command: c.input.command || '',
+              description: c.input.description || '',
+              startedAt: rec.timestamp ? Date.parse(rec.timestamp) : null,
+            });
+          }
+          // taskId dorazí ve výsledku toho volání
+          if (c && c.type === 'tool_result' && c.tool_use_id && podleToolUse.has(c.tool_use_id)) {
+            const tur = rec.toolUseResult;
+            if (tur && typeof tur === 'object' && tur.taskId) {
+              podleToolUse.get(c.tool_use_id).taskId = tur.taskId;
+            }
+          }
+        }
+      }
+    }
+    zadani = [...podleToolUse.values()];
+    _serverCache.set(sessionFile, { klic, zadani });
+  }
+  if (!zadani.length) return [];
+
+  const sessionId = path.basename(sessionFile, '.jsonl');
+  const live = liveSessions();
+  const sess = live ? live.get(sessionId) : null;
+  const rows = sess && sess.pid ? processTable() : null;
+  const ports = rows ? listeningPorts() : null;
+
+  const out = [];
+  // Týž server bývá v transcriptu spuštěný víckrát (doběhl a pustil se znovu)
+  // a všechna ta zadání mají stejný otisk, takže by se spárovala s jedním
+  // běžícím procesem a panel by ho ukázal několikrát. Proces se proto přiřadí
+  // jen jednou — a prochází se od nejnovějšího zadání, protože to popisuje
+  // běh, který opravdu žije.
+  const pouzite = new Set();
+  for (let i = zadani.length - 1; i >= 0; i--) {
+    const z = zadani[i];
+    const fp = serverFingerprint(z.command);
+    if (!fp) continue;
+    const proc = rows
+      ? rows.find((r) => r.ppid === sess.pid && !pouzite.has(r.pid) && r.command.includes(fp))
+      : null;
+    if (proc) pouzite.add(proc.pid);
+    let port = null;
+    let mereno = false;
+    if (proc && ports) {
+      for (const pid of processSubtree(proc.pid, rows)) {
+        const nalezene = ports.get(pid);
+        if (nalezene && nalezene.size) {
+          port = [...nalezene].sort((a, b) => a - b)[0];
+          mereno = true;
+          break;
+        }
+      }
+    }
+    if (port == null) port = portFromCommand(z.command);
+    if (port == null) continue; // bez portu to není server, jen úloha na pozadí
+    out.push({
+      id: z.taskId || (proc ? String(proc.pid) : 'x' + i),
+      status: proc ? 'running' : 'stopped',
+      pid: proc ? proc.pid : null,
+      // Server dostává vlastní process group, takže jde ukončit i s tím, co
+      // nastartoval (npm → node, uvicorn → workery). Bez pgid by signál
+      // dostal jen shellový wrapper a server by běžel dál.
+      pgid: proc ? proc.pgid : null,
+      procCommand: proc ? proc.command : null,
+      description: z.description,
+      command: z.command,
+      startedAt: z.startedAt,
+      port,
+      // true = port změřený přes lsof, false = vyčtený ze zadání
+      measured: mereno,
+    });
+  }
+  out.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  return out;
+}
+
 // ---------- parsování: Monitors (hlídače běžící na pozadí) ----------
 //
 // Monitor je shellová smyčka, kterou Claude pustí na pozadí, aby hlídala vnější
@@ -1283,6 +1510,7 @@ function readSessionUsage(sessionFile) {
   let outputTotal = 0;
   let inputTotal = 0;
   let cacheReadTotal = 0;
+  let cacheWriteTotal = 0;
   let contextTokens = 0;
   let lastOutput = 0;
   let maxContext = 0;
@@ -1322,6 +1550,10 @@ function readSessionUsage(sessionFile) {
     outputTotal += u.output_tokens || 0;
     inputTotal += u.input_tokens || 0;
     cacheReadTotal += u.cache_read_input_tokens || 0;
+    // Zápis do cache je ta drahá položka: když cache vychladne, celý kontext
+    // se uloží znovu za ~1,25 násobku základní sazby. V `input_tokens` se to
+    // neobjeví, takže bez tohohle čísla je vychladnutí v panelu neviditelné.
+    cacheWriteTotal += u.cache_creation_input_tokens || 0;
     const ctx =
       (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
     contextTokens = ctx; // poslední turn = aktuální obsazení
@@ -1349,7 +1581,7 @@ function readSessionUsage(sessionFile) {
     model,
     tokens: contextTokens + lastOutput,
   });
-  return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal, cache };
+  return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal, cacheWriteTotal, cache };
 }
 
 // ---------- parsování: hook hlášky (hook_system_message) ----------
@@ -2078,6 +2310,20 @@ function buildModel() {
   // nejnovější spuštěné první; do skupin podle stavu je rozvrství až webview
   monitors.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
+  // SERVERS: dev servery spuštěné na pozadí. Jako Monitors se sbírají ze všech
+  // živých session projektu — server běží dál, i když jsi přepnutý jinam.
+  const servers = [];
+  for (const s of allSessions) {
+    const alive = liveMap ? liveMap.has(s.id) : s.live;
+    // Běžící servery mají jen živé session; u sledované se čte i historie,
+    // aby skupina nezmizela, jakmile poslední server doběhne.
+    if (!alive && s.id !== activeSessionId) continue;
+    for (const sv of readSessionServers(s.file)) {
+      servers.push({ ...sv, session: s.id === activeSessionId ? null : s.title });
+    }
+  }
+  servers.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+
   // NOTIFICATIONS: hlášky hooků (systemMessage) aktivní session, bez zavřených
   const notifications = (activeSession ? visibleNotifications(activeSession) : []).map((n) => ({
     text: n.text,
@@ -2170,6 +2416,7 @@ function buildModel() {
     tools,
     agents,
     monitors,
+    servers,
     notifications,
     usage,
     sessions: sessionList,
@@ -2238,7 +2485,14 @@ class ClaudeWebviewProvider {
         pgid: msg.pgid || null,
         description: msg.description || '',
         command: msg.command || '',
+        kind: msg.kind === 'server' ? 'server' : 'monitor',
       });
+    } else if (msg.type === 'openUrl' && typeof msg.url === 'string') {
+      // Jen localhost — panel otevírá dev servery, ne libovolné odkazy
+      // z transcriptu. Kdyby se sem dostalo něco jiného, nic se nestane.
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(msg.url)) {
+        vscode.env.openExternal(vscode.Uri.parse(msg.url));
+      }
     } else if (msg.type === 'dismissNotifications' && Array.isArray(msg.keys)) {
       vscode.commands.executeCommand('claudePanel.dismissNotifications', msg.keys);
     } else if (msg.type === 'dismissNotification' && msg.key) {
@@ -2444,7 +2698,7 @@ function activate(context) {
         'PID ' + arg.pid +
         (arg.command ? '\n\n' + String(arg.command).slice(0, 400) : '');
       const choice = await vscode.window.showWarningMessage(
-        'Zastavit hlídač?',
+        arg.kind === 'server' ? 'Zastavit server?' : 'Zastavit hlídač?',
         { modal: true, detail },
         'Zastavit'
       );
@@ -2456,7 +2710,8 @@ function activate(context) {
         if (arg.pgid && arg.pgid === arg.pid) process.kill(-arg.pgid, 'SIGTERM');
         else process.kill(arg.pid, 'SIGTERM');
       } catch (e) {
-        vscode.window.showErrorMessage(`Hlídač se nepodařilo zastavit: ${e.message}`);
+        const co = arg.kind === 'server' ? 'Server' : 'Hlídač';
+        vscode.window.showErrorMessage(`${co} se nepodařilo zastavit: ${e.message}`);
         return;
       }
       invalidateProcessCache();

@@ -108,7 +108,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["notifications", "progress", "history", "tools", "agents", "monitors", "usage", "brain", "plans"],
+            "enum": ["notifications", "progress", "history", "tools", "agents", "monitors", "servers", "usage", "brain", "plans"],
             "enumDescriptions": [
               "Notifications (hook messages)",
               "To Do Progress",
@@ -116,6 +116,7 @@
               "Tools",
               "Agents (live subagents)",
               "Monitors (background watchers)",
+              "Servers (local dev servers)",
               "Usage",
               "Brain",
               "Plans"
