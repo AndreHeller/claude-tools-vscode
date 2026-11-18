@@ -324,6 +324,47 @@ body {
   font-style: italic;
 }
 
+/* ---------- detail agenta (rozklikne se z dlaždice) ---------- */
+.agent-detail {
+  padding: 4px 8px 6px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ad-fact {
+  display: flex;
+  gap: 8px;
+  font-size: 0.9em;
+}
+.ad-k {
+  opacity: 0.6;
+  min-width: 56px;
+  flex: none;
+}
+.ad-v {
+  font-family: var(--vscode-editor-font-family), monospace;
+}
+.ad-tools {
+  font-size: 0.9em;
+  opacity: 0.75;
+  font-family: var(--vscode-editor-font-family), monospace;
+  word-break: break-word;
+}
+/* Report bývá dlouhý, takže dostane strop a vlastní scroll — dlaždice
+   nesmí roztáhnout panel na několik obrazovek. */
+.ad-report {
+  margin-top: 2px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 0.9em;
+  line-height: 1.45;
+  background: var(--vscode-textBlockQuote-background);
+  border-left: 2px solid var(--vscode-textBlockQuote-border);
+  border-radius: 3px;
+}
+
 /* ---------- Monitors (hlídače na pozadí) ---------- */
 
 .monitor {

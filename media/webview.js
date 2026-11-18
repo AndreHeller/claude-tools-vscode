@@ -13,7 +13,8 @@
   // seed() — ten proběhne jednou za život panelu, takže u dřív nainstalované
   // verze se nový klíč do `collapsed` nikdy nedostane a archiv by zůstal otevřený.
   const DEFAULT_CLOSED = new Set(['t:monitors:hist']);
-  const isDefaultClosed = (key) => DEFAULT_CLOSED.has(key) || key.startsWith('t:monitor:');
+  const isDefaultClosed = (key) =>
+    DEFAULT_CLOSED.has(key) || key.startsWith('t:monitor:') || key.startsWith('a:');
   const opened = new Set(saved && saved.opened ? saved.opened : []);
   if (saved && saved.seeded) seeded = true;
 
@@ -304,6 +305,39 @@
 
   // Živí subagenti (async Task/Agent): běžící se spinnerem + „právě dělá", pak
   // dokončení / selhání. Cowork-styl přehled souběžné práce hlavního Clauda.
+  // Detail pod dlaždicí agenta: čím běžel, jak dlouho, co volal a s čím se
+  // vrátil. Prázdný řetězec znamená „není co ukázat" — agent, který ještě
+  // nic nestihl, se nerozbaluje.
+  function agentDetail(a) {
+    const s = a.stats;
+    const fakta = [];
+    if (a.model) fakta.push(['model', a.model]);
+    if (s && s.durationSec != null) fakta.push(['běžel', trvani(s.durationSec)]);
+    if (s && s.tokens) fakta.push(['tokeny', s.tokens.toLocaleString('cs')]);
+    if (a.depth != null && a.depth > 1) fakta.push(['hloubka', String(a.depth)]);
+    const radky = fakta
+      .map(([k, v]) => '<div class="ad-fact"><span class="ad-k">' + esc(k) + '</span>' +
+                       '<span class="ad-v">' + esc(v) + '</span></div>')
+      .join('');
+    let nastroje = '';
+    if (s && s.tools && s.tools.length) {
+      const vypis = s.tools.slice(0, 6).map((x) => x.name + '×' + x.count).join(' · ');
+      const zbytek = s.tools.length > 6 ? ' +' + (s.tools.length - 6) : '';
+      nastroje = '<div class="ad-tools">' + esc(vypis + zbytek) + '</div>';
+    }
+    const report = s && s.report ? '<div class="ad-report">' + esc(s.report) + '</div>' : '';
+    if (!radky && !nastroje && !report) return '';
+    return '<div class="agent-detail">' + radky + nastroje + report + '</div>';
+  }
+
+  // 51 → „51 s", 185 → „3 m 5 s"
+  function trvani(sec) {
+    if (sec < 60) return sec + ' s';
+    const m = Math.floor(sec / 60);
+    const z = sec % 60;
+    return z ? m + ' m ' + z + ' s' : m + ' m';
+  }
+
   function renderAgents() {
     const list = model.agents || [];
     if (!list.length) return '<div class="empty-hint">No subagents in this session.</div>';
@@ -331,13 +365,17 @@
               : a.summary
                 ? '<div class="agent-action agent-summary">' + esc(a.summary) + '</div>'
                 : '';
-        return (
-          '<div class="agent ' + s.cls + '" title="' + title + '">' +
+        const hdr =
           '<div class="row"><span class="ico codicon codicon-' + s.ico + '"></span>' +
           '<span class="lbl">' + label + '</span><span class="meta">' + meta + '</span></div>' +
-          action +
-          '</div>'
-        );
+          action;
+        const detail = agentDetail(a);
+        // Bez detailu zůstává dlaždice jako dřív — nerozbalitelná, bez šipky,
+        // ať neslibuje obsah, který nemá.
+        const body = detail
+          ? group('a:' + a.id, hdr, detail)
+          : hdr;
+        return '<div class="agent ' + s.cls + '" title="' + title + '">' + body + '</div>';
       })
       .join('');
     // wrapper → v širokém panelu z něj CSS udělá grid dlaždic (viz @media)

@@ -621,10 +621,93 @@ function readSubagentMetas(sessionFile) {
       name: typeof d.agentType === 'string' ? d.agentType : 'claude',
       description: typeof d.description === 'string' ? d.description : '',
       foreground: d.requestShape === 'foreground',
+      // model, na kterém agent běžel — bývá jiný než model hlavní session
+      // (levnější pro rutinní práci), takže to je první věc, kterou chce
+      // člověk vědět, když se ptá „proč mi tohle vyšlo takhle".
+      model: typeof d.model === 'string' ? d.model : null,
+      builtIn: d.isBuiltIn === true,
+      depth: typeof d.spawnDepth === 'number' ? d.spawnDepth : null,
       transcript: fs.existsSync(jsonl) ? jsonl : null,
     });
   }
   return out;
+}
+
+// ---------- statistiky z transcriptu agenta ----------
+
+// Doba běhu, spotřeba a nástroje, které agent použil. Čte se jeho vlastní
+// `.jsonl` ve složce `subagents/`, který má klidně 700 kB — proto cache podle
+// mtime a velikosti: doběhlý agent se spočítá jednou, běžícímu se soubor mění,
+// takže se přepočte sám.
+const _agentStatsCache = new Map();
+function readAgentStats(jsonlPath) {
+  let st;
+  try {
+    st = fs.statSync(jsonlPath);
+  } catch {
+    return null;
+  }
+  const klic = st.mtimeMs + ':' + st.size;
+  const cached = _agentStatsCache.get(jsonlPath);
+  if (cached && cached.klic === klic) return cached.stats;
+
+  let content;
+  try {
+    content = fs.readFileSync(jsonlPath, 'utf8');
+  } catch {
+    return null;
+  }
+  let prvni = null;
+  let posledni = null;
+  let vstup = 0;
+  let vystup = 0;
+  let toolCalls = 0;
+  const nastroje = new Map();
+  let report = null;
+  for (const line of content.split('\n')) {
+    if (!line) continue;
+    let rec;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec.timestamp) {
+      if (!prvni) prvni = rec.timestamp;
+      posledni = rec.timestamp;
+    }
+    const msg = rec.message;
+    if (!msg) continue;
+    const u = msg.usage;
+    if (u) {
+      vstup += u.input_tokens || 0;
+      vystup += u.output_tokens || 0;
+    }
+    if (!Array.isArray(msg.content)) continue;
+    for (const c of msg.content) {
+      if (!c || typeof c !== 'object') continue;
+      if (c.type === 'tool_use' && typeof c.name === 'string') {
+        toolCalls++;
+        nastroje.set(c.name, (nastroje.get(c.name) || 0) + 1);
+      }
+      // Poslední souvislý text asistenta = to, s čím se agent vrátil.
+      if (c.type === 'text' && rec.type === 'assistant' && typeof c.text === 'string' && c.text.trim()) {
+        report = c.text;
+      }
+    }
+  }
+  const doba =
+    prvni && posledni ? Math.max(0, Math.round((Date.parse(posledni) - Date.parse(prvni)) / 1000)) : null;
+  const stats = {
+    durationSec: Number.isFinite(doba) ? doba : null,
+    tokens: vstup + vystup,
+    toolCalls,
+    // nejčastější nástroje první — v detailu se ukáže jen pár prvních
+    tools: [...nastroje.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => ({ name: n, count: c })),
+    report: report ? report.trim() : null,
+  };
+  _agentStatsCache.set(jsonlPath, { klic, stats });
+  return stats;
 }
 
 function readSessionAgents(sessionFile, includeActions) {
@@ -676,13 +759,18 @@ function readSessionAgents(sessionFile, includeActions) {
         if (res) toolUseId = res.tool_use_id;
       }
       if (toolUseId) asyncToolUse.add(toolUseId);
+      const am = toolUseId ? metas.get(toolUseId) : null;
       byId.set(tur.agentId, {
         id: tur.agentId,
         toolUseId,
         name: byToolUse.get(toolUseId) || 'claude',
         description: tur.description || '',
-        model: tur.resolvedModel || null,
-        outputFile: tur.outputFile || null,
+        // `resolvedModel` z transcriptu má přednost — je to model, se kterým
+        // běh opravdu odešel; meta soubor drží zadanou hodnotu.
+        model: tur.resolvedModel || (am && am.model) || null,
+        builtIn: am ? am.builtIn : false,
+        depth: am ? am.depth : null,
+        outputFile: tur.outputFile || (am && am.transcript) || null,
         status: 'running',
         summary: null,
       });
@@ -737,7 +825,9 @@ function readSessionAgents(sessionFile, includeActions) {
       toolUseId: tuid,
       name: m.name || byToolUse.get(tuid) || 'claude',
       description: m.description,
-      model: null,
+      model: m.model,
+      builtIn: m.builtIn,
+      depth: m.depth,
       outputFile: m.transcript,
       startedAt: launchedAt.get(tuid) || null,
       status,
@@ -749,6 +839,9 @@ function readSessionAgents(sessionFile, includeActions) {
   if (includeActions) {
     for (const a of agents) {
       if (a.status === 'running' && a.outputFile) a.action = readAgentLastAction(a.outputFile);
+      // Statistiky stojí průchod transcriptem agenta, takže jen tady — a díky
+      // cache v readAgentStats jen jednou, dokud se soubor nezmění.
+      if (a.outputFile) a.stats = readAgentStats(a.outputFile);
     }
   }
   // nejnovější spuštěné první; oba zdroje se tím promíchají správně
@@ -1967,7 +2060,7 @@ function buildModel() {
   // AGENTS (live): běžící / dokončení async subagenti aktivní session
   const agents = activeSession ? readSessionAgents(activeSession, true) : [];
 
-  // TASKS: hlídače na pozadí (Monitor). Na rozdíl od Agents/Tools se NEomezují na
+  // MONITORS: hlídače na pozadí. Na rozdíl od Agents/Tools se NEomezují na
   // sledovanou session — hlídač na PR běží na pozadí a chceš o něm vědět, i když
   // jsi zrovna přepnutý jinam. Sbírá se tedy ze všech ŽIVÝCH session projektu
   // (+ ze sledované, i kdyby doběhla). Persistent monitor umírá se svou session,
