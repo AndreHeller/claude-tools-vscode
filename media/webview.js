@@ -12,8 +12,8 @@
   // Skupiny, které jsou zavřené, dokud je někdo sám neotevře. Nejde to řešit přes
   // seed() — ten proběhne jednou za život panelu, takže u dřív nainstalované
   // verze se nový klíč do `collapsed` nikdy nedostane a archiv by zůstal otevřený.
-  const DEFAULT_CLOSED = new Set(['t:tasks:hist']);
-  const isDefaultClosed = (key) => DEFAULT_CLOSED.has(key) || key.startsWith('t:task:');
+  const DEFAULT_CLOSED = new Set(['t:monitors:hist']);
+  const isDefaultClosed = (key) => DEFAULT_CLOSED.has(key) || key.startsWith('t:monitor:');
   const opened = new Set(saved && saved.opened ? saved.opened : []);
   if (saved && saved.seeded) seeded = true;
 
@@ -442,7 +442,7 @@
 
   // Dlaždice jednoho hlídače: hlavička se vejde na řádek, hlášení jsou uvnitř
   // a rozbalí se klikem — u hlídače, který běží hodiny, by jinak seznam utekl.
-  function taskTile(t, st) {
+  function monitorTile(t, st) {
     const look = st[t.status] || st.ended;
     const now = Date.now();
     // hlavička: jak dlouho běží · kolik nahlásil · kdy skončí
@@ -457,30 +457,30 @@
     const sub = [];
     if (t.interval) sub.push('á ' + t.interval + 's');
     if (t.session) sub.push('↗ ' + t.session);
-    const subLine = sub.length ? '<div class="task-src">' + esc(sub.join(' · ')) + '</div>' : '';
+    const subLine = sub.length ? '<div class="monitor-src">' + esc(sub.join(' · ')) + '</div>' : '';
     const shown = t.events.slice(-TASK_EVENTS_SHOWN);
     const hidden = t.events.length - shown.length;
-    const more = hidden > 0 ? '<div class="task-more">+ ' + hidden + ' starších</div>' : '';
+    const more = hidden > 0 ? '<div class="monitor-more">+ ' + hidden + ' starších</div>' : '';
     const timeline = t.events.length
-      ? '<div class="task-events">' +
+      ? '<div class="monitor-events">' +
         more +
         shown
           .map(
             (e) =>
-              '<div class="task-event"><span class="task-at">' +
+              '<div class="monitor-event"><span class="monitor-at">' +
               esc(fmtClock(e.at)) +
-              '</span><span class="task-text">' +
+              '</span><span class="monitor-text">' +
               esc(e.text.replace(/\s*\n+\s*/g, ' · ')) +
               '</span></div>'
           )
           .join('') +
         '</div>'
-      : '<div class="task-events task-quiet">zatím nic nehlásil</div>';
+      : '<div class="monitor-events monitor-quiet">zatím nic nehlásil</div>';
     // Zastavit jde jen hlídač, jehož proces se podařilo najít — bez PID by
     // tlačítko nemělo co zabít.
     const kill =
       t.status === 'running' && t.pid
-        ? '<button class="task-kill" title="Zastavit hlídač" data-kill="' + esc(t.pid) + '"' +
+        ? '<button class="monitor-kill" title="Zastavit hlídač" data-kill="' + esc(t.pid) + '"' +
           ' data-kill-pgid="' + esc(t.pgid || '') + '"' +
           ' data-kill-desc="' + esc(t.description) + '"' +
           ' data-kill-cmd="' + esc(String(t.procCommand || '').slice(0, 400)) + '">' +
@@ -491,31 +491,31 @@
       '<span class="lbl">' + esc(t.description) + '</span>' +
       (head.length ? '<span class="meta">' + esc(head.join(' · ')) + '</span>' : '') +
       kill;
-    return '<div class="task ' + look.cls + '">' + group('t:task:' + t.id, hdr, subLine + timeline) + '</div>';
+    return '<div class="monitor ' + look.cls + '">' + group('t:monitor:' + t.id, hdr, subLine + timeline) + '</div>';
   }
 
   // Hlídače na pozadí (Monitor). Nahoře jen ty, co OPRAVDU běží — doběhlé a ty
   // bez tepu jsou pod sbalenou historií, jinak se to, co běží, ztratí v archivu.
-  function renderTasks() {
-    const list = model.tasks || [];
+  function renderMonitors() {
+    const list = model.monitors || [];
     const st = {
-      running: { ico: 'pulse', cls: 'task-running' },
-      stopped: { ico: 'debug-stop', cls: 'task-stopped' },
-      expired: { ico: 'watch', cls: 'task-over' },
-      ended: { ico: 'circle-slash', cls: 'task-over' },
+      running: { ico: 'pulse', cls: 'monitor-running' },
+      stopped: { ico: 'debug-stop', cls: 'monitor-stopped' },
+      expired: { ico: 'watch', cls: 'monitor-over' },
+      ended: { ico: 'circle-slash', cls: 'monitor-over' },
     };
     const live = list.filter((t) => t.status === 'running');
     const past = list.filter((t) => t.status !== 'running');
     let html = live.length
-      ? live.map((t) => taskTile(t, st)).join('')
+      ? live.map((t) => monitorTile(t, st)).join('')
       : '<div class="empty-hint">Právě nic nehlídá.</div>';
     if (past.length) {
       const hdr =
         '<span class="ico codicon codicon-history"></span><span class="lbl">Historie</span>' +
         '<span class="meta">' + past.length + '</span>';
-      html += group('t:tasks:hist', hdr, past.map((t) => taskTile(t, st)).join(''));
+      html += group('t:monitors:hist', hdr, past.map((t) => monitorTile(t, st)).join(''));
     }
-    return '<div class="task-list">' + html + '</div>';
+    return '<div class="monitor-list">' + html + '</div>';
   }
 
   // `actions` je hotové HTML tlačítek vpravo v hlavičce. Leží uvnitř prvku
@@ -611,10 +611,10 @@
     if (!hidden.has('tools')) secs.push(section('Tools', 'sec:tools', renderTools()));
     if (!hidden.has('agents')) secs.push(agentsSection); // '' když session nemá agenty
     // Tasks jen když v session nějaký monitor byl (stejně jako Agents).
-    const tasks = model.tasks || [];
-    if (!hidden.has('tasks') && tasks.length) {
-      const running = tasks.filter((t) => t.status === 'running').length;
-      secs.push(section('Tasks', 'sec:tasks', renderTasks(), running ? running + ' running' : ''));
+    const monitors = model.monitors || [];
+    if (!hidden.has('monitors') && monitors.length) {
+      const running = monitors.filter((t) => t.status === 'running').length;
+      secs.push(section('Monitors', 'sec:monitors', renderMonitors(), running ? running + ' running' : ''));
     }
     if (!hidden.has('usage')) secs.push(section('Usage', 'sec:usage', renderUsage()));
     if (!hidden.has('brain')) secs.push(section('Brain', 'sec:context', renderContext()));

@@ -756,7 +756,7 @@ function readSessionAgents(sessionFile, includeActions) {
   return agents;
 }
 
-// ---------- parsování: Tasks (Monitor — hlídače běžící na pozadí) ----------
+// ---------- parsování: Monitors (hlídače běžící na pozadí) ----------
 //
 // Monitor je shellová smyčka, kterou Claude pustí na pozadí, aby hlídala vnější
 // stav (review na PR, doběh CI, deploy). Od subagenta se liší tím, že nekončí
@@ -901,7 +901,7 @@ function monitorLifetime(mode) {
 
 
 // Syrový parse monitorů z transcriptu — bez stavu, který závisí na čase.
-// Cachuje se podle mtime+velikosti, protože Tasks se čtou ze VŠECH živých session
+// Cachuje se podle mtime+velikosti, protože Monitors se čtou ze VŠECH živých session
 // projektu a transcript má klidně pár MB; bez cache by každý refresh znamenal
 // přečíst je všechny znovu.
 const _monitorCache = new Map(); // soubor -> { mtime, size, parsed }
@@ -1068,11 +1068,11 @@ function cachedMonitors(sessionFile) {
 
 // Monitory jedné session: nejnovější spuštěné první, každý s timeline událostí.
 // sessionLive = běží ještě proces té session (persistent monitor s ní umírá).
-function readSessionTasks(sessionFile, sessionLive) {
+function readSessionMonitors(sessionFile, sessionLive) {
   const { byId, events, stopped, ended } = cachedMonitors(sessionFile);
   const now = Date.now();
   const sessionId = path.basename(sessionFile, '.jsonl');
-  const tasks = [...byId.values()].map((t) => {
+  const monitors = [...byId.values()].map((t) => {
     const list = (events.get(t.id) || []).sort((a, b) => (a.at || 0) - (b.at || 0));
     let status;
     let proc = null; // proces hlídače, když se ho podařilo najít (→ dá se zastavit)
@@ -1104,8 +1104,8 @@ function readSessionTasks(sessionFile, sessionLive) {
       events: list.map((e) => ({ at: e.at, text: e.text })),
     };
   });
-  tasks.reverse(); // nejnovější spuštěné první
-  return tasks;
+  monitors.reverse(); // nejnovější spuštěné první
+  return monitors;
 }
 
 // Zkrácený formát tokenů: 528310 → "528k", 1234567 → "1.2M".
@@ -1973,17 +1973,17 @@ function buildModel() {
   // (+ ze sledované, i kdyby doběhla). Persistent monitor umírá se svou session,
   // takže stav běhu se bez informace o jejím životě určit nedá.
   const liveMap = liveSessions();
-  const tasks = [];
+  const monitors = [];
   for (const s of allSessions) {
     const alive = liveMap ? liveMap.has(s.id) : s.live;
     if (!alive && s.id !== activeSessionId) continue;
-    for (const t of readSessionTasks(s.file, alive)) {
+    for (const t of readSessionMonitors(s.file, alive)) {
       // odkud hlídač je — null u sledované session, jinak titulek té cizí
-      tasks.push({ ...t, session: s.id === activeSessionId ? null : s.title });
+      monitors.push({ ...t, session: s.id === activeSessionId ? null : s.title });
     }
   }
   // nejnovější spuštěné první; do skupin podle stavu je rozvrství až webview
-  tasks.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  monitors.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
   // NOTIFICATIONS: hlášky hooků (systemMessage) aktivní session, bez zavřených
   const notifications = (activeSession ? visibleNotifications(activeSession) : []).map((n) => ({
@@ -2076,7 +2076,7 @@ function buildModel() {
     plans,
     tools,
     agents,
-    tasks,
+    monitors,
     notifications,
     usage,
     sessions: sessionList,

@@ -324,21 +324,21 @@ body {
   font-style: italic;
 }
 
-/* ---------- Tasks (hlídače na pozadí) ---------- */
+/* ---------- Monitors (hlídače na pozadí) ---------- */
 
-.task {
+.monitor {
   padding: 6px;
   border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
   border-radius: 8px;
 }
-.task + .task {
+.monitor + .monitor {
   margin-top: 6px;
 }
-.task .ghdr {
+.monitor .ghdr {
   padding: 3px 4px;
 }
 /* zastavení hlídače — zobrazí se až na hover dlaždice, ať nesvádí k prokliku */
-.task-kill {
+.monitor-kill {
   display: none;
   flex: none;
   margin-left: 6px;
@@ -349,24 +349,24 @@ body {
   opacity: 0.7;
   cursor: pointer;
 }
-.task:hover .task-kill {
+.monitor:hover .monitor-kill {
   display: inline-flex;
 }
-.task-kill:hover {
+.monitor-kill:hover {
   opacity: 1;
   color: var(--vscode-errorForeground, #f14c4c);
 }
 /* tělo dlaždice odsazené pod popisek, ne pod caret */
-.task .gbody {
+.monitor .gbody {
   margin-left: 4px;
 }
 /* Popis musí dostat zbylé místo. Bez toho ho `meta` (flex:none) smrskne na nulu
    a z dlaždice zbude jen ikona s údaji — hlídač pak nejde poznat. */
-.task .ghdr .lbl {
+.monitor .ghdr .lbl {
   flex: 1 1 auto;
 }
 /* z které session hlídač je — vlastní řádek, titulky session bývají dlouhé */
-.task-src {
+.monitor-src {
   margin: 2px 4px 2px 22px;
   font-size: 0.9em;
   opacity: 0.55;
@@ -375,51 +375,51 @@ body {
   text-overflow: ellipsis;
 }
 /* archiv uvnitř dlaždicového seznamu — odsazení hlavičky na úroveň dlaždic */
-.task-list .group > .ghdr {
+.monitor-list .group > .ghdr {
   padding: 4px;
   opacity: 0.75;
 }
-.task-list .group {
+.monitor-list .group {
   margin-top: 6px;
 }
 /* timeline událostí — zarovnaná pod popisek, ne pod ikonu */
-.task-events {
+.monitor-events {
   margin: 2px 4px 2px 22px;
   font-size: 0.9em;
 }
-.task-event {
+.monitor-event {
   display: flex;
   gap: 8px;
   padding: 1px 0;
   align-items: baseline;
 }
 /* čas v pevném sloupci, ať texty pod sebou lícují */
-.task-at {
+.monitor-at {
   flex: 0 0 auto;
   min-width: 34px;
   opacity: 0.55;
   font-variant-numeric: tabular-nums;
 }
-.task-text {
+.monitor-text {
   flex: 1 1 auto;
   opacity: 0.85;
   overflow-wrap: anywhere;
 }
-.task-more,
-.task-quiet {
+.monitor-more,
+.monitor-quiet {
   opacity: 0.5;
   font-style: italic;
   padding: 1px 0;
 }
-.task-running .ico {
+.monitor-running .ico {
   color: var(--vscode-charts-blue, #4daafc);
 }
-.task-stopped .ico,
-.task-over .ico {
+.monitor-stopped .ico,
+.monitor-over .ico {
   opacity: 0.6;
 }
-.task-stopped .lbl,
-.task-over .lbl {
+.monitor-stopped .lbl,
+.monitor-over .lbl {
   opacity: 0.7;
 }
 
