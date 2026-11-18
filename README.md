@@ -3,7 +3,7 @@
 Read-only companion panel pro [Claude Code](https://github.com/anthropics/claude-code) ve VS Code. Přidává do sidebaru devět pohledů, inspirovaných widgetem ve web aplikaci claude.ai/code:
 
 - **Notifications** — hlášky hooků (`systemMessage`) z aktivní session — to, co v terminálu vypíše třeba SessionStart hook („⚠ ~/.claude: 66 uncommitted souborů"), ale ve VS Code okně vidět není. Závažnost podle vodicího symbolu (`⚠` warning / `✗` error / jinak info), opakované hlášky (Stop hook každý turn, resume po reloadu) sbalené s počtem `N×`. Křížkem jde hlášku zavřít (transcript zůstává netknutý — zavřené klíče drží workspaceState). Sekce se zobrazí jen, když session nějaké nezavřené hlášky má. Čerstvé hlášky SessionStart hooků navíc vyskočí jako VS Code notifikace (toast) — jednou, staré session při startu extension netoastí.
-- **To Do Progress** — aktuální seznam úkolů (TodoWrite) z běžící session daného workspace, s ikonou stavu (`✓` hotovo / `↻` rozpracováno / `○` čeká) a souhrnem `X/Y` v hlavičce.
+- **To Do Progress** — aktuální seznam úkolů z běžící session daného workspace, s ikonou stavu (`✓` hotovo / `↻` rozpracováno / `○` čeká) a souhrnem `X/Y` v hlavičce.
 - **To Do History** — historie todo dávek napříč všemi sessions projektu (jen sessions, které todo vytvořily), strukturovaná **Datum → Session → Dávka → úkoly**. Dávka = logicky uzavřený seznam (nová začíná, když se obsah úkolů kompletně vymění). Session má titulek z `aiTitle`, jinak z prvního promptu. Ukazuje i opuštěné/nedokončené dávky — věrně podle transcriptu.
 - **Tools** — co se v aktivní session použilo, u každé položky **počet volání** (`6×`): **Skills**, **Commands** (slash příkazy), **Built-in** (WebSearch/WebFetch), **Agents** (subagenti přes Task/Agent — odlišení `plugin` / `built-in` / `custom` podle `subagent_type`) a **MCP** servery + jejich tooly. Z `tool_use` bloků a `<command-name>` v transcriptu.
 - **Agents** — živí subagenti, které hlavní Claude spustil na pozadí (async Task/Agent): **běžící** se spinnerem a s tím, co právě dělají (`▸ Edit stg_deals.sql`), **dokončené** `✓`, **selhané** `✗` i s důvodem. Souhrn `X running · Y done` v hlavičce, každý agent jako orámovaná dlaždice. Panel se během běhu subagentů sám obnovuje (jejich postup se čte z výstupních transcriptů). Jen ve webview skinech (`cards` / `compact`).
@@ -38,7 +38,7 @@ Claude Code nemá veřejné API pro tahle data — extension čte přímo jeho i
 | Pohled | Zdroj |
 |---|---|
 | Notifications | aktivní `.jsonl` → attachmenty `hook_system_message` (hlášky hooků se `systemMessage`) |
-| To Do Progress | aktivní `.jsonl` → poslední `tool_use` blok `TodoWrite` (posílá vždy celý seznam) |
+| To Do Progress | aktivní `.jsonl` → poslední `tool_use` blok se seznamem úkolů (posílá vždy celý seznam). Claude Code ho zapisuje dvěma nástroji a čtou se oba: `mcp__ccd_turn__update_plan` nese položky v `input.items`, starší `TodoWrite` v `input.todos` (navíc s `activeForm`, který novější nemá — čte se tedy jen když je) |
 | To Do History | **všechny** `.jsonl` v projektové složce → todo dávky seskupené Datum → Session → Dávka |
 | Tools | aktivní `.jsonl` → `Skill` / `mcp__*` / `WebSearch…` / `Task`+`Agent` (`subagent_type`) tool_use + `<command-name>` (slash) |
 | Agents | aktivní `.jsonl` → `async_launched` výsledky + `<task-notification>` (běh/doběh) · **plus `<session>/subagents/*.meta.json`**, odkud se berou i agenti spuštění na popředí (ti v transcriptu žádný `async_launched` nezanechají) · živá akce z transcriptu agenta |

@@ -204,9 +204,36 @@ function activeSessionFile(projectDir) {
   return sessions[0].file;
 }
 
-// ---------- parsování: poslední TodoWrite v session ----------
+// ---------- parsování: poslední seznam úkolů v session ----------
 
-// Transcript (.jsonl) je append-only, takže obsahuje VŠECHNY snapshoty TodoWrite
+// Seznam úkolů zapisuje Claude Code dvěma nástroji a formáty se liší:
+//
+//   TodoWrite                     input.todos  [{ content, status, activeForm }]
+//   mcp__ccd_turn__update_plan    input.items  [{ content, status }]  + scope
+//
+// Poznávají se oba. Nový nástroj `activeForm` nemá, ale všude, kde se čte,
+// stojí za `&&` a padá zpátky na `content`, takže chybí bez následku.
+// Starší session se tím dál čtou — transcript se zpětně nepřepisuje.
+const PLAN_TOOLS = new Set(['TodoWrite', 'mcp__ccd_turn__update_plan']);
+const PLAN_MARKERS = ['"TodoWrite"', '"mcp__ccd_turn__update_plan"'];
+
+// Předfiltr řádku před JSON.parse — transcript má klidně 20 MB, takže se
+// parsuje jen to, co marker obsahuje.
+function lineHasPlan(line) {
+  return PLAN_MARKERS.some((m) => line.includes(m));
+}
+
+// Položky z jednoho tool_use bloku, nebo null když to není zápis seznamu.
+// Prázdné pole je platná odpověď (Claude seznam vyprázdnil), proto se
+// nerozlišuje od chybějícího jinak než přes null.
+function planItemsOf(c) {
+  if (!c || c.type !== 'tool_use' || !PLAN_TOOLS.has(c.name) || !c.input) return null;
+  if (Array.isArray(c.input.todos)) return c.input.todos;
+  if (Array.isArray(c.input.items)) return c.input.items;
+  return null;
+}
+
+// Transcript (.jsonl) je append-only, takže obsahuje VŠECHNY snapshoty
 // (každé volání = jeden tool_use blok s celým seznamem + timestamp záznamu).
 // Vrací [{ ts, todos }] v pořadí, jak byly zapsány.
 function readTodoSnapshots(sessionFile) {
@@ -218,7 +245,7 @@ function readTodoSnapshots(sessionFile) {
     return snaps;
   }
   for (const line of content.split('\n')) {
-    if (!line.includes('"TodoWrite"')) continue;
+    if (!lineHasPlan(line)) continue;
     let rec;
     try {
       rec = JSON.parse(line);
@@ -228,9 +255,8 @@ function readTodoSnapshots(sessionFile) {
     const msgContent = rec && rec.message && rec.message.content;
     if (!Array.isArray(msgContent)) continue;
     for (const c of msgContent) {
-      if (c && c.type === 'tool_use' && c.name === 'TodoWrite' && c.input && Array.isArray(c.input.todos)) {
-        snaps.push({ ts: rec.timestamp, todos: c.input.todos });
-      }
+      const items = planItemsOf(c);
+      if (items) snaps.push({ ts: rec.timestamp, todos: items });
     }
   }
   return snaps;
@@ -271,7 +297,7 @@ function groupTodoSnapshots(snaps) {
   return groups;
 }
 
-// Jeden průchod session souborem: TodoWrite snapshoty + titulek session.
+// Jeden průchod session souborem: snapshoty seznamu úkolů + titulek session.
 // Titulek = `aiTitle` (pokud Claude vygeneroval), jinak první user prompt.
 function readSessionData(file) {
   const snaps = [];
@@ -284,7 +310,7 @@ function readSessionData(file) {
     return { snaps, title: null };
   }
   for (const line of content.split('\n')) {
-    const hasTodo = line.includes('"TodoWrite"');
+    const hasTodo = lineHasPlan(line);
     const hasTitle = !title && line.includes('"ai-title"');
     const hasUser = !firstPrompt && line.includes('"type":"user"');
     if (!hasTodo && !hasTitle && !hasUser) continue;
@@ -306,9 +332,8 @@ function readSessionData(file) {
     const mc = rec.message && rec.message.content;
     if (Array.isArray(mc)) {
       for (const c of mc) {
-        if (c && c.type === 'tool_use' && c.name === 'TodoWrite' && c.input && Array.isArray(c.input.todos)) {
-          snaps.push({ ts: rec.timestamp, todos: c.input.todos });
-        }
+        const items = planItemsOf(c);
+        if (items) snaps.push({ ts: rec.timestamp, todos: items });
       }
     }
   }
