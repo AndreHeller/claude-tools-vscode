@@ -518,13 +518,17 @@
     return '<div class="task-list">' + html + '</div>';
   }
 
-  function section(title, key, bodyHtml, meta) {
+  // `actions` je hotové HTML tlačítek vpravo v hlavičce. Leží uvnitř prvku
+  // s `data-toggle`, takže musí nést vlastní `data-*` — obsluha hledá
+  // nejbližší zásah, a ten je pak tlačítko, ne sbalení sekce.
+  function section(title, key, bodyHtml, meta, actions) {
     const open = isOpen(key);
     const metaHtml = meta ? '<span class="meta">' + esc(meta) + '</span>' : '';
     return (
       '<div class="section">' +
       '<div class="ghdr section-hdr" data-toggle="' + esc(key) + '">' +
-      caret(key) + '<span class="lbl">' + esc(title) + '</span>' + metaHtml + '</div>' +
+      caret(key) + '<span class="lbl">' + esc(title) + '</span>' + metaHtml +
+      (actions || '') + '</div>' +
       '<div class="gbody"' + (open ? '' : ' hidden') + '>' + bodyHtml + '</div>' +
       '</div>'
     );
@@ -595,7 +599,12 @@
     // Notifications úplně nahoře, ale jen když session nějaké hook hlášky má.
     const notifs = model.notifications || [];
     if (!hidden.has('notifications') && notifs.length) {
-      secs.push(section('Notifications', 'sec:notifications', renderNotifications(), String(notifs.length)));
+      const clearAll =
+        '<button class="sec-act" data-clear-notifs="1" title="Clear all">' +
+        '<i class="codicon codicon-clear-all"></i></button>';
+      secs.push(
+        section('Notifications', 'sec:notifications', renderNotifications(), String(notifs.length), clearAll)
+      );
     }
     if (!hidden.has('progress')) secs.push(section('To Do Progress', 'sec:progress', renderProgress(), pMeta));
     if (!hidden.has('history')) secs.push(section('To Do History', 'sec:history', renderHistory()));
@@ -614,7 +623,7 @@
   }
 
   document.getElementById('root').addEventListener('click', (e) => {
-    const t = e.target.closest('[data-kill],[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle],[data-dismiss]');
+    const t = e.target.closest('[data-kill],[data-del-path],[data-skill],[data-session],[data-transcript],[data-open],[data-toggle],[data-dismiss],[data-clear-notifs]');
     if (!t) return;
     // musí být dřív než data-toggle — tlačítko sedí uvnitř skládací hlavičky
     if (t.dataset.kill !== undefined) {
@@ -630,6 +639,14 @@
     }
     if (t.dataset.skill !== undefined) {
       vscode.postMessage({ type: 'openSkill', name: t.dataset.skill });
+      return;
+    }
+    if (t.dataset.clearNotifs !== undefined) {
+      // Klíče posílá webview, ne extension: zavřít se má přesně to, co má
+      // uživatel před sebou, ne co mezitím přibylo.
+      const keys = (model.notifications || []).map((n) => n.dismissKey).filter(Boolean);
+      if (keys.length) vscode.postMessage({ type: 'dismissNotifications', keys });
+      e.stopPropagation();
       return;
     }
     if (t.dataset.dismiss !== undefined) {

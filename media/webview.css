@@ -114,6 +114,35 @@ body {
   cursor: default;
 }
 
+/* akce v hlavičce sekce (Clear all u Notifications) — jako popelnice u řádku:
+   objeví se na hover, aby hlavička v klidu nesla jen název a počet. */
+.section-hdr .sec-act {
+  display: none;
+  margin-left: auto;
+  align-self: center;
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+/* Vedle `.meta` (počet hlášek) se tlačítko lepí k ní. Obě pravidla mají
+   `margin-left: auto`, takže bez tohohle by si volný prostor rozdělila
+   napůl a tlačítko by viselo uprostřed mezery. */
+.meta + .sec-act {
+  margin-left: 2px;
+}
+.section-hdr:hover .sec-act {
+  display: inline-flex;
+}
+.section-hdr .sec-act:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+  opacity: 1;
+}
+
 /* popelnice na hover (memory fakty + plány) */
 .row .del {
   display: none;

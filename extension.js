@@ -1325,11 +1325,20 @@ function getDismissedNotifications() {
   return _extContext ? _extContext.workspaceState.get(DISMISSED_NOTIF_KEY) || [] : [];
 }
 function dismissNotification(key) {
-  if (!_extContext) return;
-  const kept = getDismissedNotifications().filter((k) => k !== key);
-  kept.push(key);
+  dismissNotifications([key]);
+}
+
+// Zavře několik hlášek naráz (tlačítko Clear all). Jedna aktualizace stavu
+// místo N za sebou — workspaceState.update je asynchronní, takže sekvence
+// jednotlivých zápisů si navzájem přepíše seznam.
+function dismissNotifications(keys) {
+  if (!_extContext || !keys || !keys.length) return;
+  const nove = keys.filter((k) => typeof k === 'string' && k);
+  if (!nove.length) return;
+  const vyrazene = new Set(nove);
+  const kept = getDismissedNotifications().filter((k) => !vyrazene.has(k));
   // neomezenému růstu seznamu brání strop — starší klíče patří mrtvým sessions
-  _extContext.workspaceState.update(DISMISSED_NOTIF_KEY, kept.slice(-300));
+  _extContext.workspaceState.update(DISMISSED_NOTIF_KEY, kept.concat(nove).slice(-300));
 }
 
 // Hlášky session k zobrazení: načtené z transcriptu minus zavřené uživatelem.
@@ -2137,6 +2146,8 @@ class ClaudeWebviewProvider {
         description: msg.description || '',
         command: msg.command || '',
       });
+    } else if (msg.type === 'dismissNotifications' && Array.isArray(msg.keys)) {
+      vscode.commands.executeCommand('claudePanel.dismissNotifications', msg.keys);
     } else if (msg.type === 'dismissNotification' && msg.key) {
       vscode.commands.executeCommand('claudePanel.dismissNotification', msg.key);
     } else if (msg.type === 'delete' && msg.path) {
@@ -2304,6 +2315,11 @@ function activate(context) {
       const key = typeof arg === 'string' ? arg : arg && arg.dismissKey;
       if (!key) return;
       dismissNotification(key);
+      refreshAll();
+    }),
+    vscode.commands.registerCommand('claudePanel.dismissNotifications', (keys) => {
+      if (!Array.isArray(keys) || !keys.length) return;
+      dismissNotifications(keys);
       refreshAll();
     }),
     vscode.commands.registerCommand('claudePanel.openTranscript', (node) => {
