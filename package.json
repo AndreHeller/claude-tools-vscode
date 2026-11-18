@@ -122,8 +122,8 @@
             ]
           },
           "uniqueItems": true,
-          "default": [],
-          "description": "Sections to hide permanently in the panel (webview cards/compact skins). Tick a section to remove it from the panel."
+          "default": ["history"],
+          "description": "Sections to hide permanently in the panel (webview cards/compact skins). Tick a section to remove it from the panel. \"To Do History\" is hidden out of the box — untick it to bring the section back."
         }
       }
     },
