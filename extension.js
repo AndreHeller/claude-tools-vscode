@@ -74,6 +74,9 @@ function liveSessions() {
       pid: d.pid, // rodič hlídačů té session — viz monitorProcess()
       status: d.status === 'busy' ? 'busy' : 'idle',
       name: typeof d.name === 'string' ? d.name : null,
+      // 'user' = pojmenoval si ji uživatel, 'derived' = odvodil si ji Claude Code
+      // z adresáře (claude-tools-88). Jen to první má přebít titulek z transcriptu.
+      nameSource: typeof d.nameSource === 'string' ? d.nameSource : null,
       cwd: typeof d.cwd === 'string' ? d.cwd : null,
     });
   }
@@ -112,6 +115,8 @@ function listSessionsMeta(projectDir) {
       ...s,
       live: live ? !!l : now - s.mtime < LIVE_WINDOW_MS,
       status: l ? l.status : null, // 'busy' | 'idle' | null (neběží / neznámo)
+      liveName: l ? l.name : null,
+      liveNameSource: l ? l.nameSource : null,
     };
   });
 }
@@ -176,7 +181,15 @@ function readSessionTitleCheap(file) {
 function listAllSessions(projectDir) {
   return listSessionsMeta(projectDir).map((s) => ({
     ...s,
-    title: readSessionTitleCheap(s.file) || s.id.slice(0, 8),
+    // Jméno, které session dal uživatel, má přednost před `ai-title`
+    // z transcriptu: do transcriptu se nezapisuje, takže bez tohohle
+    // kroku se přejmenování v přepínači vůbec neprojeví. Jméno odvozené
+    // Claude Codem (`derived`, typu `claude-tools-88`) přednost nemá —
+    // titulek z transcriptu říká víc.
+    title:
+      (s.liveNameSource === 'user' && s.liveName) ||
+      readSessionTitleCheap(s.file) ||
+      s.id.slice(0, 8),
   }));
 }
 

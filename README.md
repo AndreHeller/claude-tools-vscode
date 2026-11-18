@@ -49,7 +49,7 @@ Claude Code nemá veřejné API pro tahle data — extension čte přímo jeho i
 
 „Aktivní" session = nejnovější (`mtime`) `.jsonl` v projektové složce.
 
-„Živá" session (pro přepínač souběžných session) = **běží její proces**, ne že nedávno zapsala do transcriptu. Zdrojem je `~/.claude/sessions/<pid>.json` (`sessionId`, `cwd`, `status: busy | idle`); PID se ověřuje, protože soubory po spadlých procesech ve složce zůstávají. Session, ve které Claude čeká na vstup, tedy zůstává živá, i když do transcriptu dlouho nepíše. Tečka v přepínači: `●` pracuje, `○` čeká na vstup, `◌` už neběží (jen dosledovávaná). Bez složky `sessions/` (starší Claude Code) padá detekce zpět na mtime v okně 10 minut.
+„Živá" session (pro přepínač souběžných session) = **běží její proces**, ne že nedávno zapsala do transcriptu. Zdrojem je `~/.claude/sessions/<pid>.json` (`sessionId`, `cwd`, `status: busy | idle`, `name`, `nameSource`); PID se ověřuje, protože soubory po spadlých procesech ve složce zůstávají. Session, ve které Claude čeká na vstup, tedy zůstává živá, i když do transcriptu dlouho nepíše. Tečka v přepínači: `●` pracuje, `○` čeká na vstup, `◌` už neběží (jen dosledovávaná). Popisek je jméno, které session dal uživatel (`nameSource: user`), jinak `aiTitle` z transcriptu — jméno odvozené Claude Codem (`derived`, typu `claude-tools-88`) přednost nemá. Bez složky `sessions/` (starší Claude Code) padá detekce zpět na mtime v okně 10 minut.
 
 Cesta projektové složky vzniká nahrazením `/` za `-` v absolutní cestě workspace.
 
