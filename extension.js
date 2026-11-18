@@ -121,8 +121,15 @@ function listSessionsMeta(projectDir) {
   });
 }
 
-// Titulek session čteme jen z HLAVIČKY transcriptu (ai-title i první user prompt
-// jsou na začátku), takže načteme prvních ~64 KB, ne celý (klidně 20MB) soubor.
+// Titulek session. `ai-title` NENÍ spolehlivě na začátku: před ním leží
+// attachment záznamy (seznam skillů, deferred tools, instrukce MCP serverů),
+// které u firemní sady pluginů zaberou stovky kilobajtů — doloženo session,
+// kde první `ai-title` ležel až na 335. kB a v panelu se proto místo titulku
+// ukazoval první prompt.
+//
+// Čte se proto KONEC souboru, kde `ai-title` taky je (zapisuje se opakovaně,
+// klidně třistakrát), a jen když se tam nenajde, sáhne se na začátek pro první
+// prompt. Celý soubor se nečte nikdy — má i 20 MB.
 // Cache dle mtime; mrtvé session se čtou jen jednou.
 const _titleCache = new Map();
 function readSessionTitleCheap(file) {
@@ -137,33 +144,59 @@ function readSessionTitleCheap(file) {
 
   let title = null;
   let firstPrompt = null;
+  const OKNO = 262144; // 256 kB z každého konce
+  const kusSouboru = (fd, velikost, odKonce) => {
+    const delka = Math.min(OKNO, velikost);
+    const start = odKonce ? Math.max(0, velikost - delka) : 0;
+    const buf = Buffer.alloc(delka);
+    const bytes = fs.readSync(fd, buf, 0, delka, start);
+    const lines = buf.toString('utf8', 0, bytes).split('\n');
+    // Oříznutý řádek na kraji okna se nedá naparsovat — zahoď ten na té straně,
+    // kde řez vznikl.
+    if (odKonce && start > 0) lines.shift();
+    else if (!odKonce && bytes < velikost) lines.pop();
+    return lines;
+  };
   try {
     const fd = fs.openSync(file, 'r');
     try {
-      const buf = Buffer.alloc(65536);
-      const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
-      const lines = buf.toString('utf8', 0, bytes).split('\n');
-      if (bytes === buf.length) lines.pop(); // poslední řádek může být oříznutý
-      for (const line of lines) {
-        const hasTitle = !title && line.includes('"ai-title"');
-        const hasUser = !firstPrompt && line.includes('"type":"user"');
-        if (!hasTitle && !hasUser) continue;
-        let rec;
+      const velikost = fs.fstatSync(fd).size;
+      // Konec souboru: `ai-title` je autoritativní a poslední zapsaný je
+      // nejčerstvější, takže se bere ten nejbližší konci.
+      const konec = kusSouboru(fd, velikost, true);
+      for (let i = konec.length - 1; i >= 0 && !title; i--) {
+        const line = konec[i];
+        if (!line.includes('"ai-title"')) continue;
         try {
-          rec = JSON.parse(line);
+          const rec = JSON.parse(line);
+          if (rec.type === 'ai-title' && rec.aiTitle) title = rec.aiTitle;
         } catch {
-          continue;
+          /* oříznutý nebo poškozený řádek */
         }
-        if (rec.type === 'ai-title' && rec.aiTitle && !title) title = rec.aiTitle;
-        if (rec.type === 'user' && !firstPrompt) {
-          const c = rec.message && rec.message.content;
-          if (typeof c === 'string') firstPrompt = c;
-          else if (Array.isArray(c)) {
-            const t = c.find((x) => x && x.type === 'text');
-            if (t) firstPrompt = t.text;
+      }
+      // Bez titulku padáme na první prompt — ten je na začátku vždy.
+      if (!title) {
+        for (const line of kusSouboru(fd, velikost, false)) {
+          const hasTitle = !title && line.includes('"ai-title"');
+          const hasUser = !firstPrompt && line.includes('"type":"user"');
+          if (!hasTitle && !hasUser) continue;
+          let rec;
+          try {
+            rec = JSON.parse(line);
+          } catch {
+            continue;
           }
+          if (rec.type === 'ai-title' && rec.aiTitle && !title) title = rec.aiTitle;
+          if (rec.type === 'user' && !firstPrompt) {
+            const c = rec.message && rec.message.content;
+            if (typeof c === 'string') firstPrompt = c;
+            else if (Array.isArray(c)) {
+              const t = c.find((x) => x && x.type === 'text');
+              if (t) firstPrompt = t.text;
+            }
+          }
+          if (title) break;
         }
-        if (title) break; // ai-title je autoritativní, dál nečti
       }
     } finally {
       fs.closeSync(fd);
@@ -217,6 +250,32 @@ function activeSessionFile(projectDir) {
   return sessions[0].file;
 }
 
+// ---------- transcript: co je zdroj pravdy a co jeho kopie ----------
+
+// Claude Code od 2.1.319 zapisuje vedle vlastní konverzace i kopie odeslaného
+// požadavku (`api-request`, `api-request-blob`, `api-request-shape`). Nesou
+// tytéž `tool_use` bloky, takže kdo počítá výskyty, napočítá je dvakrát —
+// v panelu se to projevilo zdvojenými událostmi hlídačů, `2×` u nástrojů,
+// které běžely jednou, a nafouknutým počtem volání v detailu agenta.
+//
+// Blokuje se celá rodina `api-request*`: je to jeden mechanismus a další
+// varianta může přibýt stejně tiše jako tyhle.
+function jeKopieRequestu(rec) {
+  return !!rec && typeof rec.type === 'string' && rec.type.startsWith('api-request');
+}
+
+// Druhá pojistka k té první: `tool_use` id je pro každé volání unikátní, takže
+// se dá počítat bez ohledu na to, v jakém záznamu se objeví. Filtr typu chrání
+// před kopiemi, tohle před čímkoli, co by nám uniklo.
+function novyToolUse(videl, c) {
+  if (!c || c.type !== 'tool_use') return false;
+  const id = c.id;
+  if (!id) return true; // bez id se nedá rozhodnout — radši započítat
+  if (videl.has(id)) return false;
+  videl.add(id);
+  return true;
+}
+
 // ---------- parsování: poslední seznam úkolů v session ----------
 
 // Seznam úkolů zapisuje Claude Code dvěma nástroji a formáty se liší:
@@ -265,6 +324,7 @@ function readTodoSnapshots(sessionFile) {
     } catch {
       continue;
     }
+    if (jeKopieRequestu(rec)) continue;
     const msgContent = rec && rec.message && rec.message.content;
     if (!Array.isArray(msgContent)) continue;
     for (const c of msgContent) {
@@ -333,6 +393,7 @@ function readSessionData(file) {
     } catch {
       continue;
     }
+    if (jeKopieRequestu(rec)) continue;
     if (rec.type === 'ai-title' && rec.aiTitle && !title) title = rec.aiTitle;
     if (rec.type === 'user' && !firstPrompt) {
       const c = rec.message && rec.message.content;
@@ -429,6 +490,7 @@ const BUILTIN_CMD_DENY = new Set([
 ]);
 
 function readSessionTools(sessionFile) {
+  const videlTool = new Set();
   const skills = new Map(); // name -> count
   const commands = new Map();
   const builtin = new Map();
@@ -451,6 +513,7 @@ function readSessionTools(sessionFile) {
     } catch {
       continue;
     }
+    if (jeKopieRequestu(r)) continue;
     // Slash příkazy / user-spuštěné skilly (zapsané jako user zpráva s <command-name>).
     if (hasCmd && r.type === 'user') {
       const cc = r.message && r.message.content;
@@ -465,6 +528,7 @@ function readSessionTools(sessionFile) {
     if (!Array.isArray(mc)) continue;
     for (const c of mc) {
       if (!c || c.type !== 'tool_use' || typeof c.name !== 'string') continue;
+      if (!novyToolUse(videlTool, c)) continue; // kopie téhož volání se nepočítá dvakrát
       if (c.name === 'Skill' && c.input && c.input.skill) {
         bump(skills, c.input.skill);
       } else if (AGENT_TOOLS.has(c.name)) {
@@ -663,7 +727,9 @@ function readAgentStats(jsonlPath) {
   let vystup = 0;
   let toolCalls = 0;
   const nastroje = new Map();
+  const videlToolUse = new Set();
   let report = null;
+  let reportZHandbacku = false;
   for (const line of content.split('\n')) {
     if (!line) continue;
     let rec;
@@ -672,6 +738,7 @@ function readAgentStats(jsonlPath) {
     } catch {
       continue;
     }
+    if (jeKopieRequestu(rec)) continue;
     if (rec.timestamp) {
       if (!prvni) prvni = rec.timestamp;
       posledni = rec.timestamp;
@@ -686,12 +753,28 @@ function readAgentStats(jsonlPath) {
     if (!Array.isArray(msg.content)) continue;
     for (const c of msg.content) {
       if (!c || typeof c !== 'object') continue;
-      if (c.type === 'tool_use' && typeof c.name === 'string') {
+      if (c.type === 'tool_use' && typeof c.name === 'string' && novyToolUse(videlToolUse, c)) {
         toolCalls++;
         nastroje.set(c.name, (nastroje.get(c.name) || 0) + 1);
       }
-      // Poslední souvislý text asistenta = to, s čím se agent vrátil.
-      if (c.type === 'text' && rec.type === 'assistant' && typeof c.text === 'string' && c.text.trim()) {
+      // Čím se agent vrátil. Buď to napíše textem, nebo — a to je dnes
+      // běžnější — předá přes `SubagentHandback`, kde report leží v
+      // `input.message`. Handback má přednost: je to ta odpověď určená
+      // volajícímu, kdežto poslední text bývá jen průběžná poznámka.
+      if (c.type === 'tool_use' && c.name === 'SubagentHandback' && c.input) {
+        const zprava = c.input.message || c.input.report || c.input.summary;
+        if (typeof zprava === 'string' && zprava.trim()) {
+          report = zprava;
+          reportZHandbacku = true;
+        }
+      }
+      if (
+        !reportZHandbacku &&
+        c.type === 'text' &&
+        rec.type === 'assistant' &&
+        typeof c.text === 'string' &&
+        c.text.trim()
+      ) {
         report = c.text;
       }
     }
@@ -735,6 +818,7 @@ function readSessionAgents(sessionFile, includeActions) {
     } catch {
       continue;
     }
+    if (jeKopieRequestu(r)) continue;
     // Agent/Task tool_use → mapa tool_use_id → subagent_type.
     const mc = r.message && r.message.content;
     if (Array.isArray(mc)) {
@@ -906,6 +990,84 @@ function processSubtree(rootPid, rows) {
   return out;
 }
 
+// Ukončí proces i všechno, co nastartoval.
+//
+// Posílat signál jedné process group nestačí. Claude Code má ve svém shell
+// snapshotu zapnutý `monitor`, takže pod bashem dostane VLASTNÍ skupinu každý
+// příkaz zvlášť — wrapper jednu, server v něm druhou. Signál skupině wrapperu
+// pak server mine, ten osiří pod initem a protože už není potomkem session,
+// panel ho přestane vidět a zastavit nejde vůbec. Doloženo na WSL; pod zsh na
+// macOS skupinu sdílejí a jeden signál stačil, takže se na to dalo naletět.
+//
+// Projde se proto celý strom potomků a signál dostane každá skupina v něm,
+// plus jednotlivé procesy jako záloha pro případ, že se strom načíst nedá.
+function ukonciStrom(pid, pgid, port) {
+  if (!pid && !port) return;
+  const rows = processTable();
+  const pidy = pid ? (rows ? processSubtree(pid, rows) : [pid]) : [];
+  const skupiny = new Set();
+  if (rows) {
+    for (const r of rows) if (pidy.includes(r.pid) && r.pgid) skupiny.add(r.pgid);
+  } else if (pgid) {
+    skupiny.add(pgid);
+  }
+  // Pojistka: nikdy nestřílet do skupiny, ve které běží VS Code (a tím pádem
+  // i tenhle panel) nebo Claude Code. Když proces svou skupinu s některým z nich
+  // sdílí, signál skupině by vzal i je — ověřeno tvrdě při testu, kdy to
+  // položilo shell, ze kterého test běžel. V takovém případě zůstanou jen
+  // adresné signály jednotlivým procesům.
+  const chranene = new Set();
+  const mojeSkupina = (rows || []).find((r) => r.pid === process.pid);
+  if (mojeSkupina && mojeSkupina.pgid) chranene.add(mojeSkupina.pgid);
+  const live = liveSessions();
+  if (live && rows) {
+    for (const s of live.values()) {
+      const sr = rows.find((r) => r.pid === s.pid);
+      if (sr && sr.pgid) chranene.add(sr.pgid);
+    }
+  }
+  for (const g of chranene) skupiny.delete(g);
+  let doruceno = 0;
+  // Nejdřív skupiny — tím padne i to, co proces spustil a co už ve stromu
+  // nemusí být vidět (krátkověké potomky `ps` nestihne zachytit).
+  for (const g of skupiny) {
+    try {
+      process.kill(-g, 'SIGTERM');
+      doruceno++;
+    } catch {
+      /* skupina mezitím skončila, nebo ji systém nezná (Windows) */
+    }
+  }
+  // Pak jednotlivé procesy: na platformě bez process groups je tohle jediná
+  // cesta, a i jinde dorazí na to, co skupinový signál minul.
+  for (const x of pidy) {
+    try {
+      process.kill(x, 'SIGTERM');
+      doruceno++;
+    } catch {
+      /* už neběží */
+    }
+  }
+  // Server, který se při zastavení odpojil od wrapperu, ve stromu není — osiří
+  // pod initem a adresný signál ho mine. Dohledá se proto podle portu: ten
+  // panel změřil, když server ještě běžel, takže míří na správný proces.
+  if (port) {
+    const ports = listeningPorts();
+    if (ports) {
+      for (const [drzitel, cisla] of ports) {
+        if (!cisla.has(port) || pidy.includes(drzitel)) continue;
+        try {
+          process.kill(drzitel, 'SIGTERM');
+          doruceno++;
+        } catch {
+          /* mezitím skončil */
+        }
+      }
+    }
+  }
+  if (!doruceno) throw new Error('žádný z procesů už neběžel');
+}
+
 // Port ze zadání. Používá se, když proces neběží nebo `lsof` nic nevrátil —
 // je to tvrzení autora příkazu, ne měření, takže má nižší váhu.
 // Databázové porty v proměnných (`…@localhost:55432/db`) se vynechávají:
@@ -995,6 +1157,7 @@ function readSessionServers(sessionFile) {
       } catch {
         continue;
       }
+      if (jeKopieRequestu(rec)) continue;
       const mc = rec.message && rec.message.content;
       if (Array.isArray(mc)) {
         for (const c of mc) {
@@ -1251,6 +1414,9 @@ function parseMonitorLines(text, state) {
     } catch {
       continue;
     }
+    // Kopie požadavku nese tytéž bloky bez časové značky, takže se události
+    // hlídače objevovaly dvakrát — jednou s časem a jednou bez něj.
+    if (jeKopieRequestu(r)) continue;
     const ts = r.timestamp ? Date.parse(r.timestamp) : null;
     const mc = r.message && r.message.content;
     if (Array.isArray(mc)) {
@@ -2486,6 +2652,7 @@ class ClaudeWebviewProvider {
         description: msg.description || '',
         command: msg.command || '',
         kind: msg.kind === 'server' ? 'server' : 'monitor',
+        port: typeof msg.port === 'number' ? msg.port : null,
       });
     } else if (msg.type === 'openUrl' && typeof msg.url === 'string') {
       // Jen localhost — panel otevírá dev servery, ne libovolné odkazy
@@ -2704,11 +2871,7 @@ function activate(context) {
       );
       if (choice !== 'Zastavit') return;
       try {
-        // Hlídač dostává vlastní process group, takže se dá ukončit i s tím, co
-        // zrovna spustil (gh, sleep). Zápornou hodnotou jen když je pgid opravdu
-        // jeho vlastní — jinak by šel signál cizí skupině.
-        if (arg.pgid && arg.pgid === arg.pid) process.kill(-arg.pgid, 'SIGTERM');
-        else process.kill(arg.pid, 'SIGTERM');
+        ukonciStrom(arg.pid, arg.pgid, arg.port || null);
       } catch (e) {
         const co = arg.kind === 'server' ? 'Server' : 'Hlídač';
         vscode.window.showErrorMessage(`${co} se nepodařilo zastavit: ${e.message}`);

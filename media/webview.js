@@ -456,7 +456,10 @@
       // neříká vůči čemu. Čísla jdou porovnat mezi sebou na první pohled.
       usageRow('arrow-up', 'Claude napsal', u.outputTotal, '') +
       usageRow('database', 'Přečteno z cache', u.cacheReadTotal, '0,1×') +
-      usageRow('save', 'Uloženo do cache', u.cacheWriteTotal, '1,25×') +
+      // Násobek závisí na TTL cache: pětiminutová stojí 1,25×, hodinová 2×.
+      // Natvrdo napsaná hodnota lhala každému, kdo jede s 1h cache.
+      usageRow('save', 'Uloženo do cache', u.cacheWriteTotal,
+        u.cache && u.cache.ttl === '1h' ? '2×' : '1,25×') +
       usageRow('arrow-down', 'Mimo cache', u.inputTotal, '1×') +
       usageLegenda()
     );
@@ -588,7 +591,9 @@
     const dlazdice = (s) => {
           const url = 'http://localhost:' + s.port;
           const head = [];
-          if (s.startedAt) head.push('běží ' + fmtDur(now - s.startedAt));
+          // U doběhlého serveru by minuty rostly dál do teď — vypadalo to,
+          // jako by pořád běžel.
+          if (s.status !== 'stopped' && s.startedAt) head.push('běží ' + fmtDur(now - s.startedAt));
           // Odkud se port vzal, se nezamlčuje: změřený je doklad, že se
           // opravdu poslouchá, kdežto vyčtený ze zadání je jen tvrzení příkazu.
           if (!s.measured) head.push('port ze zadání');
@@ -606,6 +611,7 @@
             (s.status === 'stopped' ? '' :
             '<button class="monitor-kill" title="Zastavit server" data-kill="' + esc(s.pid) + '"' +
             ' data-kill-kind="server"' +
+            ' data-kill-port="' + esc(s.port) + '"' +
             ' data-kill-pgid="' + esc(s.pgid || '') + '"' +
             ' data-kill-desc="' + esc(s.description || '') + '"' +
             ' data-kill-cmd="' + esc(String(s.procCommand || s.command || '').slice(0, 400)) + '">' +
@@ -804,6 +810,7 @@
         description: t.dataset.killDesc || '',
         command: t.dataset.killCmd || '',
         kind: t.dataset.killKind || 'monitor',
+        port: t.dataset.killPort ? Number(t.dataset.killPort) : null,
       });
       return;
     }

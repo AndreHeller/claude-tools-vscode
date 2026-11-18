@@ -315,6 +315,10 @@ body {
 .server-tile .ghdr .meta {
   flex: 0 1 auto;
   min-width: 0;
+  /* Strop, aby dlouhá metadata (`běží 11 min · port ze zadání · ↗ session`)
+     nevytlačila popis úplně. Bez něj se zkrátí až ve chvíli, kdy na popis
+     nezbude ani znak — a zmizel celý. */
+  max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
