@@ -310,24 +310,25 @@
   // nic nestihl, se nerozbaluje.
   function agentDetail(a) {
     const s = a.stats;
+    // Fakta na jednom řádku oddělená tečkami. Dřív to byl sloupec popisek +
+    // hodnota, kde popisek držel pevnou šířku — ve widším panelu z toho byly
+    // pásy prázdna a čtyři řádky na informaci, která se vejde na jeden.
+    // Jednotka u čísla řekne, co je co, i bez popisku.
     const fakta = [];
-    if (a.model) fakta.push(['model', a.model]);
-    if (s && s.durationSec != null) fakta.push(['běžel', trvani(s.durationSec)]);
-    if (s && s.tokens) fakta.push(['tokeny', s.tokens.toLocaleString('cs')]);
-    if (a.depth != null && a.depth > 1) fakta.push(['hloubka', String(a.depth)]);
-    const radky = fakta
-      .map(([k, v]) => '<div class="ad-fact"><span class="ad-k">' + esc(k) + '</span>' +
-                       '<span class="ad-v">' + esc(v) + '</span></div>')
-      .join('');
-    let nastroje = '';
+    if (a.model) fakta.push(a.model);
+    if (s && s.durationSec != null) fakta.push(trvani(s.durationSec));
+    if (s && s.tokens) fakta.push(s.tokens.toLocaleString('cs') + ' tok.');
     if (s && s.tools && s.tools.length) {
-      const vypis = s.tools.slice(0, 6).map((x) => x.name + '×' + x.count).join(' · ');
-      const zbytek = s.tools.length > 6 ? ' +' + (s.tools.length - 6) : '';
-      nastroje = '<div class="ad-tools">' + esc(vypis + zbytek) + '</div>';
+      const vypis = s.tools.slice(0, 4).map((x) => x.name + '×' + x.count).join(' · ');
+      fakta.push(vypis + (s.tools.length > 4 ? ' +' + (s.tools.length - 4) : ''));
     }
+    if (a.depth != null && a.depth > 1) fakta.push('hloubka ' + a.depth);
+    const shrnuti = fakta.length
+      ? '<div class="ad-line">' + esc(fakta.join('  ·  ')) + '</div>'
+      : '';
     const report = s && s.report ? '<div class="ad-report">' + esc(s.report) + '</div>' : '';
-    if (!radky && !nastroje && !report) return '';
-    return '<div class="agent-detail">' + radky + nastroje + report + '</div>';
+    if (!shrnuti && !report) return '';
+    return '<div class="agent-detail">' + shrnuti + report + '</div>';
   }
 
   // 51 → „51 s", 185 → „3 m 5 s"
@@ -349,7 +350,10 @@
         const s = st[a.status] || { ico: 'error', cls: 'agent-failed' };
         const title = esc(a.name + (a.model ? ' · ' + a.model : '') + (a.summary ? '\n' + a.summary : ''));
         const label = esc(a.description || a.name);
-        const meta = esc(a.name);
+        // Typ agenta vpravo jen tehdy, když vlevo stojí popis. Bez popisu
+        // padá název na typ a ukazovat ho dvakrát nemá smysl — navíc se vlevo
+        // zkrátí třemi tečkami a vypadá to rozbitě.
+        const meta = a.description ? esc(a.name) : '';
         // běžící → live akce; dokončený → nic (summary „Agent X finished" jen duplikuje
         // popis); selhalý/jiný → summary nese důvod (např. session limit), ten ukážeme
         const action =
@@ -364,7 +368,8 @@
                 : '';
         const hdr =
           '<div class="row"><span class="ico codicon codicon-' + s.ico + '"></span>' +
-          '<span class="lbl">' + label + '</span><span class="meta">' + meta + '</span></div>' +
+          '<span class="lbl">' + label + '</span>' +
+          (meta ? '<span class="meta">' + meta + '</span>' : '') + '</div>' +
           action;
         const detail = agentDetail(a);
         // Bez detailu zůstává dlaždice jako dřív — nerozbalitelná, bez šipky,
