@@ -945,7 +945,11 @@ function readSessionAgents(sessionFile, includeActions) {
         model: tur.resolvedModel || (am && am.model) || null,
         builtIn: am ? am.builtIn : false,
         depth: am ? am.depth : null,
-        outputFile: tur.outputFile || (am && am.transcript) || null,
+        // Trvalý transcript ze `subagents/` má přednost. `outputFile` z výsledku
+        // spuštění leží v /tmp a Claude Code ho při restartu session smaže —
+        // doběhlý agent by pak v Historii přišel o dobu běhu, tokeny, nástroje
+        // i report a zůstal by mu jen model z meta souboru.
+        outputFile: (am && am.transcript) || tur.outputFile || null,
         status: 'running',
         summary: null,
       });
