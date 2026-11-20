@@ -761,7 +761,7 @@
       { klic: 'monitors', nazev: 'Monitors', vse: monitors, bezi: (x) => x.status === 'running' },
       { klic: 'servers', nazev: 'Servers', vse: servers, bezi: (x) => x.status !== 'stopped' },
       { klic: 'backgrounds', nazev: 'Background', vse: backgrounds, bezi: (x) => x.status !== 'stopped' },
-    ].filter((d) => !hidden.has(d.klic) && d.vse.length);
+    ].filter((d) => !hidden.has(d.klic));
 
     const zive = [];
     const archiv = [];
@@ -779,7 +779,11 @@
         archiv.push(subSection(d.nazev, 'hist:' + d.klic, dlazdiceDruhu(d.klic, minule), String(minule.length)));
       }
     }
-    if (zive.length || archiv.length) {
+    // Sekce stojí v panelu vždycky, i když nic neběží a historie je prázdná
+    // (nová session). Kdyby mizela, nedá se poznat, jestli se nic neděje, nebo
+    // jestli panel přestal Activity ukazovat. Zmizí jen tehdy, když si uživatel
+    // schová všechny skupiny settingem. Prázdné skupiny se nevykreslují dál.
+    if (druhy.length) {
       let telo = zive.length ? zive.join('') : '<div class="empty-hint">Nothing running right now.</div>';
       if (archiv.length) {
         const hdr =
