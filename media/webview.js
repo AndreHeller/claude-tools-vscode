@@ -485,14 +485,15 @@
     const vetev = g.detached ? 'detached @' + g.oid : g.branch;
     let out =
       '<div class="row git-row" title="' + esc(g.cwd || '') + '">' +
-      '<span class="ico codicon codicon-git-branch"></span><span class="lbl">Git</span>' +
+      '<span class="ico codicon codicon-git-branch"></span><span class="lbl">' + esc(g.repo || 'Git') + '</span>' +
       '<span class="meta git-branch">' + esc(vetev) + '</span></div>';
     if (g.ahead != null) {
       out += radek('arrow-up', 'Unpushed', String(g.ahead), g.ahead > 0 ? ' warn' : '');
       // „Za upstreamem" je stav z posledního fetche — nic se tu nestahuje
       if (g.behind > 0) out += radek('arrow-down', 'Behind upstream', String(g.behind));
     } else if (!g.detached) {
-      out += radek('arrow-up', 'Unpushed', 'no upstream');
+      // upstream nastavený, ale bez `branch.ab` = větev na remote zmizela
+      out += radek('arrow-up', 'Unpushed', g.upstream ? 'upstream gone' : 'no upstream');
     }
     const casti = [];
     if (g.staged) casti.push(g.staged + ' staged');

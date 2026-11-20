@@ -1701,7 +1701,7 @@ function readSessionUsage(sessionFile) {
   let ttl = null;
   let lastUsageIdx = -1;
   let lastRequestIdx = -1;
-  let effort = null;
+  let effortLabel = null;
   let cwd = null; // kde session právě je (sleduje `cd` i vstup do worktree)
   let firstCwd = null; // kde začala — fallback pro git, když `cwd` není repo
   let content;
@@ -1750,7 +1750,7 @@ function readSessionUsage(sessionFile) {
       // Přiřazuje se i `null`: po přepnutí na model bez effortu štítek zmizí,
       // místo aby zůstal viset ten z předchozího modelu. Sidechain (subagent)
       // běží na vlastním effortu a nepatří session.
-      effort = EFFORT_LABELS.get(r.effort || r.perTurnEffort) || null;
+      effortLabel = EFFORT_LABELS.get(r.effort || r.perTurnEffort) || null;
       if (typeof r.cwd === 'string' && r.cwd) {
         cwd = r.cwd;
         if (!firstCwd) firstCwd = r.cwd;
@@ -1779,7 +1779,7 @@ function readSessionUsage(sessionFile) {
   });
   return {
     model,
-    effort,
+    effortLabel, // hotový štítek (Low…Max) pro webview, nebo null
     cwd,
     firstCwd,
     contextTokens,
@@ -1796,8 +1796,8 @@ function readSessionUsage(sessionFile) {
 //
 // Rozhoduje se podle něj, kdy pushnout (push pouští CI, kvóta minut je omezená),
 // takže nejdůležitější je počet nepushnutých commitů. Čtení je jedno
-// `git status --porcelain=v2 --branch` + počet záznamů ve stashi, bez fetche —
-// nic nečeká na síť. „Za upstreamem" je tedy stav z posledního fetche.
+// `git status --porcelain=v2 --branch` + název repa + počet záznamů ve stashi,
+// bez fetche — nic nečeká na síť. „Za upstreamem" je tedy stav z posledního fetche.
 
 const GIT_TTL_MS = 15 * 1000; // nejčastější přepočet; buildModel běží i každé 2 s
 const GIT_TIMEOUT_MS = 3000; // obří repo: radši starý údaj než zaseknutý panel
@@ -1813,7 +1813,7 @@ function parseGitStatus(out) {
     detached: false,
     oid: '',
     upstream: null,
-    ahead: null, // null = bez upstreamu → nepushnuté se nedají spočítat
+    ahead: null, // null = bez upstreamu (nebo je smazaný) → nepushnuté se nedají spočítat
     behind: null,
     staged: 0,
     modified: 0,
@@ -1875,6 +1875,11 @@ async function readGit(cwds) {
     if (r.unknown) return undefined;
     if (!r.ok) continue;
     const st = parseGitStatus(r.out);
+    // Název repa: session může `cd` odejít do jiného repa (nebo worktree) a podle
+    // samotné větve (`main`) by nešlo poznat, čí stav panel ukazuje. U worktree
+    // je to název jeho složky, takže se odliší i od hlavního checkoutu.
+    const t = await runGit(cwd, ['rev-parse', '--show-toplevel']);
+    st.repo = t.ok ? path.basename(t.out.trim()) : null;
     // Bez stashe `rev-list` končí chybou 128 (refs/stash neexistuje) → 0.
     // Stash je sdílený mezi worktrees, počet je tedy za celé repo.
     const s = await runGit(cwd, ['rev-list', '--walk-reflogs', '--count', 'refs/stash']);
@@ -2696,12 +2701,10 @@ function buildModel({ gitLive = false } = {}) {
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;
   if (usage) {
-    usage.effortLabel = usage.effort; // webview dostává hotový štítek (Low…Max) nebo null
     usage.git = gitState(gitCandidates(activeSession, usage), gitLive);
     // cwd slouží jen k volbě složky pro git, webview je nepotřebuje
     delete usage.cwd;
     delete usage.firstCwd;
-    delete usage.effort;
   }
 
   // HISTORY: Datum → Session → Dávka → úkoly
