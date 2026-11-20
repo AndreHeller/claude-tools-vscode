@@ -368,7 +368,11 @@
     const fakta = [];
     if (a.model) fakta.push(a.model);
     if (s && s.durationSec != null) fakta.push(trvani(s.durationSec));
+    // Tokeny po složkách jako v Usage: u agenta, který hodně čte, je vstup +
+    // výstup zlomek toho, čím prošel, takže samotné číslo by bylo zavádějící.
     if (s && s.tokens) fakta.push(s.tokens.toLocaleString('cs') + ' tok.');
+    if (s && s.cacheRead) fakta.push(s.cacheRead.toLocaleString('cs') + ' cache read');
+    if (s && s.cacheWrite) fakta.push(s.cacheWrite.toLocaleString('cs') + ' cache write');
     if (s && s.tools && s.tools.length) {
       const vypis = s.tools.slice(0, 4).map((x) => x.name + '×' + x.count).join(' · ');
       fakta.push(vypis + (s.tools.length > 4 ? ' +' + (s.tools.length - 4) : ''));

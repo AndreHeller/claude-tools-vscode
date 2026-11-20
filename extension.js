@@ -790,6 +790,21 @@ function readSubagentMetas(sessionFile) {
 
 // ---------- statistiky z transcriptu agenta ----------
 
+// Součet `usage` přes zprávy. Volající předává usage JEDNOU NA ZPRÁVU: Claude
+// Code zapisuje jednu odpověď API jako několik záznamů — jeden na každý content
+// blok (thinking, text, tool_use) — a každý nese celé `usage` téže zprávy.
+// Sčítáno po záznamech vycházelo 2–2,6× víc, než kolik zpráva stála.
+function sectiUsage(usages) {
+  const t = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const u of usages) {
+    t.input += u.input_tokens || 0;
+    t.output += u.output_tokens || 0;
+    t.cacheRead += u.cache_read_input_tokens || 0;
+    t.cacheWrite += u.cache_creation_input_tokens || 0;
+  }
+  return t;
+}
+
 // Doba běhu, spotřeba a nástroje, které agent použil. Čte se jeho vlastní
 // `.jsonl` ve složce `subagents/`, který má klidně 700 kB — proto cache podle
 // mtime a velikosti: doběhlý agent se spočítá jednou, běžícímu se soubor mění,
@@ -814,14 +829,16 @@ function readAgentStats(jsonlPath) {
   }
   let prvni = null;
   let posledni = null;
-  let vstup = 0;
-  let vystup = 0;
   let toolCalls = 0;
   const nastroje = new Map();
   const videlToolUse = new Set();
+  // usage jednou na zprávu (klíč `message.id`) — viz sectiUsage()
+  const usageZprav = new Map();
   let report = null;
   let reportZHandbacku = false;
-  for (const line of content.split('\n')) {
+  const radky = content.split('\n');
+  for (let i = 0; i < radky.length; i++) {
+    const line = radky[i];
     if (!line) continue;
     let rec;
     try {
@@ -836,11 +853,7 @@ function readAgentStats(jsonlPath) {
     }
     const msg = rec.message;
     if (!msg) continue;
-    const u = msg.usage;
-    if (u) {
-      vstup += u.input_tokens || 0;
-      vystup += u.output_tokens || 0;
-    }
+    if (msg.usage) usageZprav.set(msg.id || 'radek:' + i, msg.usage);
     if (!Array.isArray(msg.content)) continue;
     for (const c of msg.content) {
       if (!c || typeof c !== 'object') continue;
@@ -872,9 +885,14 @@ function readAgentStats(jsonlPath) {
   }
   const doba =
     prvni && posledni ? Math.max(0, Math.round((Date.parse(posledni) - Date.parse(prvni)) / 1000)) : null;
+  const t = sectiUsage(usageZprav.values());
   const stats = {
     durationSec: Number.isFinite(doba) ? doba : null,
-    tokens: vstup + vystup,
+    // Složky zvlášť: u agenta, který hodně čte, je vstup + výstup jen zlomek
+    // toho, čím prošel — čtení z cache bývá o dva řády víc.
+    tokens: t.input + t.output,
+    cacheRead: t.cacheRead,
+    cacheWrite: t.cacheWrite,
     toolCalls,
     // nejčastější nástroje první — v detailu se ukáže jen pár prvních
     tools: [...nastroje.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => ({ name: n, count: c })),
@@ -1805,6 +1823,8 @@ function readSessionUsage(sessionFile) {
   } catch {
     return null;
   }
+  // usage jednou na zprávu (klíč `message.id`), poslední záznam zprávy vyhrává
+  const usageZprav = new Map();
   const lines = content.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -1828,13 +1848,8 @@ function readSessionUsage(sessionFile) {
     if (m.model === '<synthetic>') continue;
     const u = m.usage;
     model = m.model || model;
-    outputTotal += u.output_tokens || 0;
-    inputTotal += u.input_tokens || 0;
-    cacheReadTotal += u.cache_read_input_tokens || 0;
-    // Zápis do cache je ta drahá položka: když cache vychladne, celý kontext
-    // se uloží znovu za ~1,25 násobku základní sazby. V `input_tokens` se to
-    // neobjeví, takže bez tohohle čísla je vychladnutí v panelu neviditelné.
-    cacheWriteTotal += u.cache_creation_input_tokens || 0;
+    // Součty až za smyčkou, jednou na zprávu — viz sectiUsage().
+    usageZprav.set(m.id || 'radek:' + i, u);
     const ctx =
       (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
     contextTokens = ctx; // poslední turn = aktuální obsazení
@@ -1855,6 +1870,15 @@ function readSessionUsage(sessionFile) {
     if (cc.ephemeral_1h_input_tokens > 0) ttl = '1h';
     else if (cc.ephemeral_5m_input_tokens > 0) ttl = '5m';
   }
+  const soucty = sectiUsage(usageZprav.values());
+  outputTotal = soucty.output;
+  inputTotal = soucty.input;
+  cacheReadTotal = soucty.cacheRead;
+  // Zápis do cache je ta drahá položka: když cache vychladne, celý kontext
+  // se uloží znovu za 1,25× (5min TTL) nebo 2× (1h TTL) základní sazby.
+  // V `input_tokens` se to neobjeví, takže bez tohohle čísla je vychladnutí
+  // v panelu neviditelné.
+  cacheWriteTotal = soucty.cacheWrite;
   if (!model && !contextTokens) return null;
   // Limit nejde z modelu spolehlivě vyčíst (sufix [1m] v transcriptu není). Setting přebije.
   // Auto: Opus i Fable jedou s 1M oknem; jinak fallback dle pozorovaného maxima.
