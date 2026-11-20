@@ -1673,6 +1673,20 @@ function promptCacheInfo({ lines, lastUsageIdx, lastRequestIdx, ttl, model, toke
   };
 }
 
+// Reasoning effort: assistant záznamy nesou na nejvyšší úrovni `effort`
+// (novější verze i `perTurnEffort`; starší Claude Code, nebo model bez effortu,
+// pole nemá vůbec). Hodnoty jsou ověřené na reálných transcriptech; `low` se
+// v nich nevyskytl, ale patří do stupnice. Neznámá hodnota = bez štítku.
+// `settings.json` jako zdroj nejde: `modelSettings.*.effortLevel` je jen výchozí
+// volba pro model, ne to, na čem session skutečně běžela.
+const EFFORT_LABELS = new Map([
+  ['low', 'Low'],
+  ['medium', 'Med'],
+  ['high', 'High'],
+  ['xhigh', 'XHigh'],
+  ['max', 'Max'],
+]);
+
 // Usage aktivní session z `usage` bloků assistant záznamů.
 // Context window = input + cache_creation + cache_read posledního turnu.
 function readSessionUsage(sessionFile) {
@@ -1687,6 +1701,9 @@ function readSessionUsage(sessionFile) {
   let ttl = null;
   let lastUsageIdx = -1;
   let lastRequestIdx = -1;
+  let effort = null;
+  let cwd = null; // kde session právě je (sleduje `cd` i vstup do worktree)
+  let firstCwd = null; // kde začala — fallback pro git, když `cwd` není repo
   let content;
   try {
     content = fs.readFileSync(sessionFile, 'utf8');
@@ -1728,7 +1745,17 @@ function readSessionUsage(sessionFile) {
     contextTokens = ctx; // poslední turn = aktuální obsazení
     lastOutput = u.output_tokens || 0;
     if (ctx > maxContext) maxContext = ctx;
-    if (!r.isSidechain) lastUsageIdx = i;
+    if (!r.isSidechain) {
+      lastUsageIdx = i;
+      // Přiřazuje se i `null`: po přepnutí na model bez effortu štítek zmizí,
+      // místo aby zůstal viset ten z předchozího modelu. Sidechain (subagent)
+      // běží na vlastním effortu a nepatří session.
+      effort = EFFORT_LABELS.get(r.effort || r.perTurnEffort) || null;
+      if (typeof r.cwd === 'string' && r.cwd) {
+        cwd = r.cwd;
+        if (!firstCwd) firstCwd = r.cwd;
+      }
+    }
     const cc = u.cache_creation || {};
     if (cc.ephemeral_1h_input_tokens > 0) ttl = '1h';
     else if (cc.ephemeral_5m_input_tokens > 0) ttl = '5m';
@@ -1750,7 +1777,165 @@ function readSessionUsage(sessionFile) {
     model,
     tokens: contextTokens + lastOutput,
   });
-  return { model, contextTokens, limit, outputTotal, inputTotal, cacheReadTotal, cacheWriteTotal, cache };
+  return {
+    model,
+    effort,
+    cwd,
+    firstCwd,
+    contextTokens,
+    limit,
+    outputTotal,
+    inputTotal,
+    cacheReadTotal,
+    cacheWriteTotal,
+    cache,
+  };
+}
+
+// ---------- git status pracovní složky session ----------
+//
+// Rozhoduje se podle něj, kdy pushnout (push pouští CI, kvóta minut je omezená),
+// takže nejdůležitější je počet nepushnutých commitů. Čtení je jedno
+// `git status --porcelain=v2 --branch` + počet záznamů ve stashi, bez fetche —
+// nic nečeká na síť. „Za upstreamem" je tedy stav z posledního fetche.
+
+const GIT_TTL_MS = 15 * 1000; // nejčastější přepočet; buildModel běží i každé 2 s
+const GIT_TIMEOUT_MS = 3000; // obří repo: radši starý údaj než zaseknutý panel
+const GIT_CACHE_MAX = 8;
+
+// Porcelain v2 → počty. Čistá funkce, ať jde otestovat bez gitu.
+//   # branch.head <název | (detached)>   # branch.oid <sha | (initial)>
+//   # branch.upstream <název>            # branch.ab +<před> -<za>   (jen s upstreamem)
+//   1|2 <XY> …  změněná / přejmenovaná   u <XY> …  nesloučená   ? <cesta>  nesledovaná
+function parseGitStatus(out) {
+  const st = {
+    branch: null,
+    detached: false,
+    oid: '',
+    upstream: null,
+    ahead: null, // null = bez upstreamu → nepushnuté se nedají spočítat
+    behind: null,
+    staged: 0,
+    modified: 0,
+    untracked: 0,
+  };
+  for (const line of out.split('\n')) {
+    if (line.startsWith('# branch.head ')) {
+      const h = line.slice(14).trim();
+      st.detached = h === '(detached)';
+      st.branch = st.detached ? null : h;
+    } else if (line.startsWith('# branch.oid ')) {
+      const o = line.slice(13).trim();
+      st.oid = o === '(initial)' ? '' : o.slice(0, 7);
+    } else if (line.startsWith('# branch.upstream ')) {
+      st.upstream = line.slice(18).trim();
+    } else if (line.startsWith('# branch.ab ')) {
+      const m = line.match(/^# branch\.ab \+(\d+) -(\d+)/);
+      if (m) {
+        st.ahead = +m[1];
+        st.behind = +m[2];
+      }
+    } else if (line.startsWith('1 ') || line.startsWith('2 ')) {
+      // XY: X = index (staging), Y = pracovní strom; '.' = beze změny
+      if (line[2] !== '.') st.staged++;
+      if (line[3] !== '.') st.modified++;
+    } else if (line.startsWith('u ')) {
+      st.modified++; // konflikt se počítá jednou, ne do staging i do změn
+    } else if (line.startsWith('? ')) {
+      st.untracked++;
+    }
+  }
+  return st;
+}
+
+// `unknown` = nevíme (timeout, přetečený buffer) → volající ponechá starý údaj.
+// Jinak selhání znamená „tady repo není" (git končí kódem 128) nebo složka
+// zmizela (smazaný worktree) — obojí vede k dalšímu kandidátovi / bez řádku.
+function runGit(cwd, args) {
+  return new Promise((resolve) => {
+    require('child_process').execFile(
+      'git',
+      // --no-optional-locks: status si jinak sám zapisuje index a mohl by
+      // zablokovat uživatelův vlastní git příkaz
+      ['--no-optional-locks', ...args],
+      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, windowsHide: true, env: { ...process.env, LC_ALL: 'C' } },
+      (err, stdout) => {
+        if (!err) return resolve({ ok: true, out: stdout });
+        resolve({ ok: false, unknown: !!err.killed || err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+      }
+    );
+  });
+}
+
+// Zkusí složky popořadě (kde session je, pak kde začala); první, která je repo,
+// vyhrává. null = žádná není repo, undefined = nevíme.
+async function readGit(cwds) {
+  for (const cwd of cwds) {
+    const r = await runGit(cwd, ['status', '--porcelain=v2', '--branch']);
+    if (r.unknown) return undefined;
+    if (!r.ok) continue;
+    const st = parseGitStatus(r.out);
+    // Bez stashe `rev-list` končí chybou 128 (refs/stash neexistuje) → 0.
+    // Stash je sdílený mezi worktrees, počet je tedy za celé repo.
+    const s = await runGit(cwd, ['rev-list', '--walk-reflogs', '--count', 'refs/stash']);
+    st.stash = s.ok ? parseInt(s.out, 10) || 0 : 0;
+    st.cwd = cwd;
+    return st;
+  }
+  return null;
+}
+
+// Cache podle kandidátů. buildModel() běží při každém překreslení, takže git se
+// tady nikdy nečeká: vrací poslední známý výsledek hned a přepočet (nejvýš jeden
+// naráz, nejdřív po GIT_TTL_MS) spustí na pozadí. Když se výsledek změnil,
+// zavolá _onGitChange → překreslení. `allowRun` = false (skrytý panel) jen čte.
+const _gitCache = new Map();
+let _onGitChange = null;
+
+function gitState(cwds, allowRun) {
+  if (!cwds.length) return null;
+  const key = cwds.join('\n');
+  let e = _gitCache.get(key);
+  if (!e) {
+    e = { at: 0, state: null, running: false };
+    _gitCache.set(key, e);
+    // cwd se během session mění; staré klíče nechceme držet donekonečna
+    while (_gitCache.size > GIT_CACHE_MAX) _gitCache.delete(_gitCache.keys().next().value);
+  }
+  if (allowRun && !e.running && Date.now() - e.at >= GIT_TTL_MS) {
+    e.running = true;
+    readGit(cwds)
+      .then((state) => {
+        e.at = Date.now();
+        if (state === undefined) return; // nevíme → ponech starý údaj
+        const changed = JSON.stringify(state) !== JSON.stringify(e.state);
+        e.state = state;
+        if (changed && _onGitChange) _onGitChange();
+      })
+      .catch(() => {
+        e.at = Date.now();
+      })
+      .finally(() => {
+        e.running = false;
+      });
+  }
+  return e.state;
+}
+
+// Tlačítko Obnovit: další překreslení přepočítá hned, ne až po TTL.
+function invalidateGitCache() {
+  for (const e of _gitCache.values()) e.at = 0;
+}
+
+// Kde se git čte: kde session právě je; když tam repo není, kde začala.
+// Z `sessions/<pid>.json` je start přesný, u doběhlé session zbývá první `cwd`
+// z transcriptu.
+function gitCandidates(sessionFile, usage) {
+  const id = path.basename(sessionFile, '.jsonl');
+  const live = liveSessions();
+  const l = live ? live.get(id) : null;
+  const start = (l && l.cwd) || usage.firstCwd;
+  return [usage.cwd, start].filter((c, i, a) => c && a.indexOf(c) === i);
 }
 
 // ---------- parsování: hook hlášky (hook_system_message) ----------
@@ -2436,7 +2621,8 @@ function appearance() {
 }
 
 // Plochý JSON model pro webview — staví ze stejných read funkcí jako TreeView.
-function buildModel() {
+// `gitLive`: panel je vidět → smí se spustit přepočet gitu (jinak jen cache).
+function buildModel({ gitLive = false } = {}) {
   const folders = vscode.workspace.workspaceFolders;
   const wsPath = folders && folders.length ? folders[0].uri.fsPath : null;
   const projectDir = projectDirForWorkspace();
@@ -2509,6 +2695,14 @@ function buildModel() {
 
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;
+  if (usage) {
+    usage.effortLabel = usage.effort; // webview dostává hotový štítek (Low…Max) nebo null
+    usage.git = gitState(gitCandidates(activeSession, usage), gitLive);
+    // cwd slouží jen k volbě složky pro git, webview je nepotřebuje
+    delete usage.cwd;
+    delete usage.firstCwd;
+    delete usage.effort;
+  }
 
   // HISTORY: Datum → Session → Dávka → úkoly
   const sessions = projectDir ? getProjectSessions(projectDir) : [];
@@ -2622,7 +2816,11 @@ class ClaudeWebviewProvider {
   }
   refresh() {
     if (!this.view) return;
-    this.view.webview.postMessage({ type: 'render', model: buildModel(), skin: appearance() });
+    this.view.webview.postMessage({
+      type: 'render',
+      model: buildModel({ gitLive: !!this.view.visible }),
+      skin: appearance(),
+    });
   }
   _html(webview) {
     // cache-buster — ať webview vždy natáhne čerstvé CSS/JS (ne cachované)
@@ -2696,6 +2894,8 @@ function activate(context) {
   const usage = new UsageProvider();
   const notifications = new NotificationsProvider();
   const webview = new ClaudeWebviewProvider(context.extensionUri);
+  // git se počítá na pozadí; až doběhne a něco se změnilo, překreslí se panel
+  _onGitChange = () => webview.refresh();
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('claudeNotifications', notifications),
@@ -2802,7 +3002,10 @@ function activate(context) {
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudePanel.refresh', refreshAll),
+    vscode.commands.registerCommand('claudePanel.refresh', () => {
+      invalidateGitCache();
+      refreshAll();
+    }),
     vscode.commands.registerCommand('claudePanel.selectSession', async () => {
       const projectDir = projectDirForWorkspace();
       if (!projectDir) {
@@ -2952,6 +3155,7 @@ function activate(context) {
       watchers.forEach((w) => w.close());
       if (livePoll) clearInterval(livePoll);
       clearInterval(livenessTick);
+      _onGitChange = null;
     },
   });
 

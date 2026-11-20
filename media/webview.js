@@ -448,12 +448,13 @@
     const level = pct >= 80 ? ' crit' : pct >= 50 ? ' warn' : '';
     return (
       (u.model
-        ? '<div class="row"><span class="ico codicon codicon-chip"></span><span class="lbl">Model</span><span class="meta">' + esc(u.model) + '</span></div>'
+        ? '<div class="row"><span class="ico codicon codicon-chip"></span><span class="lbl">Model</span><span class="meta">' + esc(u.model) + (u.effortLabel ? ' · ' + esc(u.effortLabel) : '') + '</span></div>'
         : '') +
       '<div class="row"><span class="ico codicon codicon-window"></span><span class="lbl">Context window</span>' +
       '<span class="meta">' + fmtTok(u.contextTokens) + ' / ' + fmtTok(u.limit) + ' · ' + pct + '%</span></div>' +
       '<progress class="ctxbar' + level + '" max="100" value="' + Math.min(100, pct) + '"></progress>' +
       (u.cache ? cacheRow(u.cache, Date.now()) : '') +
+      gitRows(u.git) +
       // Součty za session stojí pod stavem kontextu a měří něco jiného, takže
       // dostaly vlastní nadpis — jinak to vypadá jako čtyři varianty téhož.
       '<div class="usage-sum-hdr">Whole session</div>' +
@@ -468,6 +469,41 @@
       usageRow('arrow-down', 'Outside cache', u.inputTotal, '1×') +
       usageLegenda()
     );
+  }
+
+  // Git pracovní složky session. Rozhoduje se podle něj, kdy pushnout, takže
+  // nepushnuté commity mají vlastní řádek a od první věci se zbarví. Texty jsou
+  // slovy, ne symboly: nativní `title` se ve webview nezobrazí, takže by
+  // `⚑` a `~` neměly kde vysvětlit, co znamenají. Bez repa se nevykreslí nic.
+  function gitRows(g) {
+    if (!g) return '';
+    const radek = (ico, popis, hodnota, cls) =>
+      '<div class="row git-row' + (cls || '') + '">' +
+      '<span class="ico codicon codicon-' + ico + '"></span>' +
+      '<span class="lbl">' + esc(popis) + '</span>' +
+      '<span class="meta">' + esc(hodnota) + '</span></div>';
+    const vetev = g.detached ? 'detached @' + g.oid : g.branch;
+    let out =
+      '<div class="row git-row" title="' + esc(g.cwd || '') + '">' +
+      '<span class="ico codicon codicon-git-branch"></span><span class="lbl">Git</span>' +
+      '<span class="meta git-branch">' + esc(vetev) + '</span></div>';
+    if (g.ahead != null) {
+      out += radek('arrow-up', 'Unpushed', String(g.ahead), g.ahead > 0 ? ' warn' : '');
+      // „Za upstreamem" je stav z posledního fetche — nic se tu nestahuje
+      if (g.behind > 0) out += radek('arrow-down', 'Behind upstream', String(g.behind));
+    } else if (!g.detached) {
+      out += radek('arrow-up', 'Unpushed', 'no upstream');
+    }
+    const casti = [];
+    if (g.staged) casti.push(g.staged + ' staged');
+    if (g.modified) casti.push(g.modified + ' changed');
+    if (g.untracked) casti.push(g.untracked + ' untracked');
+    if (g.stash) casti.push(g.stash + ' stash');
+    out +=
+      '<div class="row git-row git-dirty">' +
+      '<span class="ico codicon codicon-diff"></span>' +
+      '<span class="lbl">' + esc(casti.length ? casti.join(' · ') : 'working tree clean') + '</span></div>';
+    return out;
   }
 
   // Řádek součtu v Usage. `pozn` je násobek základní sazby — co znamená,
