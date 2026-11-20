@@ -770,27 +770,33 @@ body.skin-cards .server-tile > .group > .gbody {
   opacity: 1;
 }
 
-/* Git v Usage: nepushnuté commity se zvýrazní, ať je vidět, že je co pushnout.
-   Název větve bývá dlouhý (feature/…-slug), v úzkém sidebaru se zkrátí. */
-.git-row .meta.git-branch {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+/* Hlavička panelu: sledovaná session + git její pracovní složky. */
+.panel-hdr {
+  padding: 2px 0 6px;
 }
-.git-row .meta {
+.panel-hdr .session-picker {
+  padding: 2px 8px;
+}
+/* stav vpravo zůstává celý, zkracuje se název session / větev vlevo;
+   i ve skinu cards, který jinak popisky řádků zalamuje */
+.panel-hdr .row .lbl,
+body.skin-cards .panel-hdr .row .lbl {
+  flex: 1 1 0;
+  white-space: nowrap;
+}
+.hdr-dot {
+  text-align: center;
+  opacity: 0.7;
+}
+.hdr-git .meta {
   font-family: var(--vscode-editor-font-family), monospace;
 }
-.git-row.warn .meta,
-.git-row.warn .ico {
+/* nepushnuté commity: je co pushnout */
+.git-warn {
   color: var(--vscode-charts-yellow, #e2c08d);
-  opacity: 1;
 }
-/* souhrn změn je věta, ne popisek — smí se zalomit */
-.git-dirty .lbl {
-  white-space: normal;
-  opacity: 0.85;
+.hdr-git .meta:has(.git-warn) {
+  opacity: 1;
 }
 
 /* responsive: v širokém kontejneru (dolní panel) sekce jako dlaždice, ne sloupec.
@@ -945,11 +951,6 @@ body.skin-compact .ghdr {
   align-items: center;
   gap: 6px;
   padding: 4px 8px 6px;
-}
-.session-picker .sp-label {
-  flex: none;
-  opacity: 0.7;
-  font-size: 1em;
 }
 .sp-select {
   flex: 1 1 auto;

@@ -117,37 +117,72 @@
   // Volba zafixuje (sticky) sledovanou session pro Progress / Tools / Usage.
   // „Živá" = běží její proces (~/.claude/sessions/<pid>.json), ne že nedávno
   // zapsala do transcriptu — session, kde Claude čeká na tvůj vstup, je živá taky.
-  function renderSessionPicker() {
+  // Hlavička panelu: ke které session data patří a kde ta session pracuje.
+  // Stojí vždycky — když se přepínač pod dvěma session schovával, nebylo
+  // v panelu nic, co by řeklo, že ukazuje třeba starou session (nová ještě
+  // nemá transcript, takže Auto vezme poslední změněný).
+  function renderHeader() {
+    const out = sessionLine() + gitLine(model.git);
+    return out ? '<div class="panel-hdr">' + out + '</div>' : '';
+  }
+
+  // ● pracuje · ○ čeká na vstup · ◌ už neběží
+  function sessionDot(s) {
+    return !s.live ? '◌' : s.status === 'busy' ? '●' : '○';
+  }
+
+  function fmtAgo(ms) {
+    const min = Math.floor(ms / 60000);
+    if (min < 1) return 'just now';
+    if (min < 60) return min + 'm ago';
+    const h = Math.floor(min / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.floor(h / 24) + 'd ago';
+  }
+
+  function sessionLine() {
     const list = model.sessions || [];
     const active = model.activeSessionId;
     const selected = model.selectedSessionId; // null = auto režim
+    const cur = list.find((s) => s.id === active);
+    if (!cur) return '';
     // živé + případně právě sledovaná (i když už doběhla), ať je vidět co sleduješ
     // Vybraná session musí v nabídce zůstat i po tom, co doběhne — jinak
     // přepínač pod dvěma živými zmizí i s ní a není kudy se vrátit na Auto.
     const shown = list.filter((s) => s.live || s.id === active || s.id === selected);
-    // Pod dvěma položkami nemá přepínač co nabízet, ale ve sticky režimu se
-    // schovat nesmí: zmizel by jediný ovladač, kterým jde fixace zrušit.
-    if (shown.length < 2 && selected == null) return '';
-    const opts = shown
-      .map((s) => {
-        // v auto režimu je vybraná položka „Auto", ne konkrétní session
-        const sel = selected != null && s.id === selected ? ' selected' : '';
-        // ● pracuje · ○ čeká na vstup · ◌ už neběží (jen dosledovávaná)
-        const dot = !s.live ? '◌ ' : s.status === 'busy' ? '● ' : '○ ';
-        return '<option value="' + esc(s.id) + '"' + sel + '>' + dot + esc(s.title) + '</option>';
-      })
-      .join('');
-    const autoSel = selected == null ? ' selected' : '';
+    // Je z čeho vybírat, nebo je session ručně připíchnutá (přepínač je
+    // jediný ovladač, kterým jde fixace zrušit) → přepínač. Jinak prostý řádek
+    // ve stejném tvaru.
+    if (shown.length >= 2 || selected != null) {
+      const opts = shown
+        .map((s) => {
+          // v auto režimu je vybraná položka „Auto", ne konkrétní session
+          const sel = selected != null && s.id === selected ? ' selected' : '';
+          return '<option value="' + esc(s.id) + '"' + sel + '>' + sessionDot(s) + ' ' + esc(s.title) + '</option>';
+        })
+        .join('');
+      const autoSel = selected == null ? ' selected' : '';
+      return (
+        '<div class="session-picker">' +
+        '<select class="sp-select" id="sessionSelect">' +
+        // v Auto je z nabídky vidět i to, kterou session Auto právě sleduje
+        '<option value="__auto__"' + autoSel + '>↻ Auto (latest) · ' + esc(cur.title) + '</option>' +
+        opts +
+        '</select>' +
+        '</div>'
+      );
+    }
+    // Doběhlá session dostane stáří: podle něj je poznat, že panel ukazuje
+    // starou session, a ne tu, kterou uživatel právě založil.
+    const meta = 'auto' + (!cur.live && cur.mtime ? ' · ' + fmtAgo(Date.now() - cur.mtime) : '');
     return (
-      '<div class="session-picker">' +
-      '<span class="sp-label codicon codicon-comment-discussion"></span>' +
-      '<select class="sp-select" id="sessionSelect">' +
-      '<option value="__auto__"' + autoSel + '>↻ Auto (latest)</option>' +
-      opts +
-      '</select>' +
-      '</div>'
+      '<div class="row hdr-session">' +
+      '<span class="ico hdr-dot">' + sessionDot(cur) + '</span>' +
+      '<span class="lbl">' + esc(cur.title) + '</span>' +
+      '<span class="meta">' + esc(meta) + '</span></div>'
     );
   }
+
 
   // Hlášky hooků (systemMessage) — to, co SessionStart/Stop hook vypíše do terminálu.
   function renderNotifications() {
@@ -454,7 +489,6 @@
       '<span class="meta">' + fmtTok(u.contextTokens) + ' / ' + fmtTok(u.limit) + ' · ' + pct + '%</span></div>' +
       '<progress class="ctxbar' + level + '" max="100" value="' + Math.min(100, pct) + '"></progress>' +
       (u.cache ? cacheRow(u.cache, Date.now()) : '') +
-      gitRows(u.git) +
       // Součty za session stojí pod stavem kontextu a měří něco jiného, takže
       // dostaly vlastní nadpis — jinak to vypadá jako čtyři varianty téhož.
       '<div class="usage-sum-hdr">Whole session</div>' +
@@ -471,41 +505,33 @@
     );
   }
 
-  // Git pracovní složky session. Rozhoduje se podle něj, kdy pushnout, takže
-  // nepushnuté commity mají vlastní řádek a od první věci se zbarví. Texty jsou
-  // slovy, ne symboly: nativní `title` se ve webview nezobrazí, takže by
-  // `⚑` a `~` neměly kde vysvětlit, co znamenají. Bez repa se nevykreslí nic.
-  function gitRows(g) {
+  // Git pracovní složky session, jeden řádek: vlevo repo a větev, vpravo stav.
+  // Rozhoduje se podle něj, kdy pushnout, takže nepushnuté commity se od první
+  // věci zbarví. Texty jsou slovy, ne symboly: nativní `title` se ve webview
+  // nezobrazí, takže by `⚑` a `~` neměly kde vysvětlit, co znamenají.
+  // Bez repa (nebo schované přes hiddenSections) se nevykreslí nic.
+  function gitLine(g) {
     if (!g) return '';
-    const radek = (ico, popis, hodnota, cls) =>
-      '<div class="row git-row' + (cls || '') + '">' +
-      '<span class="ico codicon codicon-' + ico + '"></span>' +
-      '<span class="lbl">' + esc(popis) + '</span>' +
-      '<span class="meta">' + esc(hodnota) + '</span></div>';
     const vetev = g.detached ? 'detached @' + g.oid : g.branch;
-    let out =
-      '<div class="row git-row" title="' + esc(g.cwd || '') + '">' +
-      '<span class="ico codicon codicon-git-branch"></span><span class="lbl">' + esc(g.repo || 'Git') + '</span>' +
-      '<span class="meta git-branch">' + esc(vetev) + '</span></div>';
-    if (g.ahead != null) {
-      out += radek('arrow-up', 'Unpushed', String(g.ahead), g.ahead > 0 ? ' warn' : '');
-      // „Za upstreamem" je stav z posledního fetche — nic se tu nestahuje
-      if (g.behind > 0) out += radek('arrow-down', 'Behind upstream', String(g.behind));
-    } else if (!g.detached) {
-      // upstream nastavený, ale bez `branch.ab` = větev na remote zmizela
-      out += radek('arrow-up', 'Unpushed', g.upstream ? 'upstream gone' : 'no upstream');
-    }
     const casti = [];
+    if (g.ahead > 0) casti.push('<span class="git-warn">' + g.ahead + ' unpushed</span>');
+    // „behind" je stav z posledního fetche — nic se tu nestahuje
+    if (g.behind > 0) casti.push(g.behind + ' behind');
+    // upstream nastavený, ale bez `branch.ab` = větev na remote zmizela
+    if (g.ahead == null && !g.detached) casti.push(g.upstream ? 'upstream gone' : 'no upstream');
     if (g.staged) casti.push(g.staged + ' staged');
     if (g.modified) casti.push(g.modified + ' changed');
     if (g.untracked) casti.push(g.untracked + ' untracked');
     if (g.stash) casti.push(g.stash + ' stash');
-    out +=
-      '<div class="row git-row git-dirty">' +
-      '<span class="ico codicon codicon-diff"></span>' +
-      '<span class="lbl">' + esc(casti.length ? casti.join(' · ') : 'working tree clean') + '</span></div>';
-    return out;
+    return (
+      '<div class="row hdr-git" title="' + esc(g.cwd || '') + '">' +
+      '<span class="ico codicon codicon-git-branch"></span>' +
+      '<span class="lbl">' + esc((g.repo ? g.repo + ' · ' : '') + vetev) + '</span>' +
+      // části jsou čísla a pevná slova, escapovat není co; span pro žlutou
+      '<span class="meta">' + (casti.length ? casti.join(' · ') : 'clean') + '</span></div>'
+    );
   }
+
 
   // Řádek součtu v Usage. `pozn` je násobek základní sazby — co znamená,
   // vysvětluje legenda pod součty.
@@ -836,7 +862,7 @@
     if (!hidden.has('usage')) secs.push(section('Usage', 'sec:usage', renderUsage()));
     if (!hidden.has('brain')) secs.push(section('Brain', 'sec:context', renderContext()));
     if (!hidden.has('plans')) secs.push(section('Plans', 'sec:plans', renderPlans()));
-    root.innerHTML = renderSessionPicker() + secs.join('');
+    root.innerHTML = renderHeader() + secs.join('');
   }
 
   document.getElementById('root').addEventListener('click', (e) => {

@@ -108,7 +108,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["notifications", "progress", "history", "tools", "agents", "monitors", "servers", "backgrounds", "usage", "brain", "plans"],
+            "enum": ["notifications", "progress", "history", "tools", "agents", "monitors", "servers", "backgrounds", "git", "usage", "brain", "plans"],
             "enumDescriptions": [
               "Notifications (hook messages)",
               "To Do Progress",
@@ -118,6 +118,7 @@
               "Monitors (background watchers)",
               "Servers (local dev servers)",
               "Background (jobs without a port)",
+              "Git line in the header (repo, branch, unpushed commits)",
               "Usage",
               "Brain",
               "Plans"

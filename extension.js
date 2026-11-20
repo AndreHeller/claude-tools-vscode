@@ -2700,8 +2700,13 @@ function buildModel({ gitLive = false } = {}) {
 
   // USAGE: context window + token totals aktivní session
   const usage = activeSession ? readSessionUsage(activeSession) : null;
+  // GIT: hlavička panelu pod sledovanou session. Složku určuje `cwd`
+  // z transcriptu, proto se bere z téhož průchodu jako Usage. Schovaný
+  // řádek (`hiddenSections: git`) git vůbec nespouští.
+  const hidden = vscode.workspace.getConfiguration('claudeTools').get('hiddenSections', []);
+  let git = null;
   if (usage) {
-    usage.git = gitState(gitCandidates(activeSession, usage), gitLive);
+    if (!hidden.includes('git')) git = gitState(gitCandidates(activeSession, usage), gitLive);
     // cwd slouží jen k volbě složky pro git, webview je nepotřebuje
     delete usage.cwd;
     delete usage.firstCwd;
@@ -2776,6 +2781,7 @@ function buildModel({ gitLive = false } = {}) {
     live: s.live,
     status: s.status, // 'busy' | 'idle' | null — rozlišení tečky v pickeru
     path: s.file,
+    mtime: s.mtime, // stáří doběhlé session v hlavičce
   }));
 
   return {
@@ -2790,11 +2796,12 @@ function buildModel({ gitLive = false } = {}) {
     backgrounds,
     notifications,
     usage,
+    git,
     sessions: sessionList,
     activeSessionId,
     selectedSessionId: getSelectedSessionId(), // null = auto (nejnovější)
     // sekce, které si uživatel trvale schoval (setting) — webview je nevykreslí
-    hiddenSections: vscode.workspace.getConfiguration('claudeTools').get('hiddenSections', []),
+    hiddenSections: hidden,
   };
 }
 
