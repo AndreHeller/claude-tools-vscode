@@ -144,8 +144,15 @@
     const list = model.sessions || [];
     const active = model.activeSessionId;
     const selected = model.selectedSessionId; // null = auto režim
-    const cur = list.find((s) => s.id === active);
+    const via = model.sessionVia; // pinned | tab | newTab | latest
+    // Aktivní tab Claude Code je nová session bez transcriptu: data žádná
+    // nejsou, a hlavička to musí říct, jinak by to vypadalo jako chyba.
+    const cur =
+      list.find((s) => s.id === active) ||
+      (via === 'newTab' ? { id: null, title: 'New session', live: true, status: 'idle', fresh: true } : null);
     if (!cur) return '';
+    // Podle čeho Auto session vybralo: aktivní tab Claude Code, nebo nejnovější.
+    const autoKind = via === 'tab' || via === 'newTab' ? 'tab' : 'latest';
     // živé + případně právě sledovaná (i když už doběhla), ať je vidět co sleduješ
     // Vybraná session musí v nabídce zůstat i po tom, co doběhne — jinak
     // přepínač pod dvěma živými zmizí i s ní a není kudy se vrátit na Auto.
@@ -158,7 +165,10 @@
         .map((s) => {
           // v auto režimu je vybraná položka „Auto", ne konkrétní session
           const sel = selected != null && s.id === selected ? ' selected' : '';
-          return '<option value="' + esc(s.id) + '"' + sel + '>' + sessionDot(s) + ' ' + esc(s.title) + '</option>';
+          // Ručně vybraná session přebíjí tab i nejnovější — musí to být vidět,
+          // jinak to vypadá, že Auto nefunguje.
+          const pin = sel ? '📌 ' : '';
+          return '<option value="' + esc(s.id) + '"' + sel + '>' + pin + sessionDot(s) + ' ' + esc(s.title) + '</option>';
         })
         .join('');
       const autoSel = selected == null ? ' selected' : '';
@@ -166,15 +176,20 @@
         '<div class="session-picker">' +
         '<select class="sp-select" id="sessionSelect">' +
         // v Auto je z nabídky vidět i to, kterou session Auto právě sleduje
-        '<option value="__auto__"' + autoSel + '>↻ Auto (latest) · ' + esc(cur.title) + '</option>' +
+        // (při ručním výběru Auto nic nesleduje, titulek by patřil připíchnuté)
+        '<option value="__auto__"' + autoSel + '>' +
+        (selected == null ? '↻ Auto (' + autoKind + ') · ' + esc(cur.title) : '↻ Auto') + '</option>' +
         opts +
         '</select>' +
+        (selected != null ? '<span class="meta">pinned</span>' : '') +
         '</div>'
       );
     }
     // Doběhlá session dostane stáří: podle něj je poznat, že panel ukazuje
     // starou session, a ne tu, kterou uživatel právě založil.
-    const meta = 'auto' + (!cur.live && cur.mtime ? ' · ' + fmtAgo(Date.now() - cur.mtime) : '');
+    const meta = cur.fresh
+      ? 'tab · no transcript yet'
+      : (autoKind === 'tab' ? 'tab' : 'auto') + (!cur.live && cur.mtime ? ' · ' + fmtAgo(Date.now() - cur.mtime) : '');
     return (
       '<div class="row hdr-session">' +
       '<span class="ico hdr-dot">' + sessionDot(cur) + '</span>' +

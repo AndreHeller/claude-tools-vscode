@@ -78,6 +78,8 @@ function liveSessions() {
       // z adresáře (claude-tools-88). Jen to první má přebít titulek z transcriptu.
       nameSource: typeof d.nameSource === 'string' ? d.nameSource : null,
       cwd: typeof d.cwd === 'string' ? d.cwd : null,
+      // 'claude-vscode' = session v tabu VS Code (jen ty jde přiřadit k tabu)
+      entrypoint: typeof d.entrypoint === 'string' ? d.entrypoint : null,
     });
   }
   _liveCache = { at: now, map };
@@ -117,6 +119,8 @@ function listSessionsMeta(projectDir) {
       status: l ? l.status : null, // 'busy' | 'idle' | null (neběží / neznámo)
       liveName: l ? l.name : null,
       liveNameSource: l ? l.nameSource : null,
+      // starší Claude Code entrypoint nezapisoval → nevíme, ber jako VS Code
+      vscode: l ? !l.entrypoint || l.entrypoint === 'claude-vscode' : false,
     };
   });
 }
@@ -205,8 +209,16 @@ function readSessionTitleCheap(file) {
     /* nečitelné — vrať fallback */
   }
   const label = title || (firstPrompt ? firstPrompt.replace(/\s+/g, ' ').trim().slice(0, 50) : null);
-  _titleCache.set(file, { mtime, title: label });
+  _titleCache.set(file, { mtime, title: label, ai: !!title });
   return label;
+}
+
+// Má session skutečný titulek (`ai-title`), nebo jen první prompt? Tab Claude
+// Code se do příchodu titulku jmenuje „Claude Code". Volat po
+// readSessionTitleCheap — čte jen jeho cache.
+function sessionHasAiTitle(file) {
+  const c = _titleCache.get(file);
+  return !!(c && c.ai);
 }
 
 // Metadata + titulek (pro picker / QuickPick). Titulek je levný (jen hlavička),
@@ -223,6 +235,7 @@ function listAllSessions(projectDir) {
       (s.liveNameSource === 'user' && s.liveName) ||
       readSessionTitleCheap(s.file) ||
       s.id.slice(0, 8),
+    titled: !!(s.liveNameSource === 'user' && s.liveName) || sessionHasAiTitle(s.file),
   }));
 }
 
@@ -240,14 +253,92 @@ function setSelectedSessionId(id) {
 // dokud daná session existuje; jinak (i bez výběru) fallback na nejnovější.
 // Tím panel přestane „blikat" mezi paralelními session dle toho, která zapsala poslední.
 function activeSessionFile(projectDir) {
+  return resolveActiveSession(projectDir).file;
+}
+
+// Kterou session panel sleduje a proč:
+//   pinned — uživatel ji vybral v přepínači (má přednost před vším)
+//   tab    — patří k aktivnímu tabu Claude Code
+//   newTab — aktivní tab je nová session bez transcriptu → žádná data
+//   latest — nic z toho, bere se naposledy změněný transcript
+function resolveActiveSession(projectDir) {
   const sessions = listSessionsMeta(projectDir); // jen stat, žádné čtení obsahu
-  if (!sessions.length) return null;
   const sel = getSelectedSessionId();
   if (sel) {
     const found = sessions.find((s) => s.id === sel);
-    if (found) return found.file;
+    if (found) return { file: found.file, via: 'pinned' };
   }
-  return sessions[0].file;
+  if (_claudeTabLabel) {
+    const m = sessionForTab(_claudeTabLabel, listAllSessions(projectDir));
+    if (m === NEW_TAB) return { file: null, via: 'newTab' };
+    if (m) return { file: m.file, via: 'tab' };
+  }
+  return { file: sessions.length ? sessions[0].file : null, via: 'latest' };
+}
+
+// ---------- session podle aktivního tabu Claude Code ----------
+//
+// Claude Code neprozradí, kterou session má tab otevřenou. Tab ale nese jako
+// název její titulek (`ai-title`, po přejmenování jméno od uživatele), takže se
+// páruje podle něj. Při otevření tabu Claude Code titulek zkrátí na 24 znaků
+// + „…", pozdější přejmenování tabu už ne. Nová session bez titulku se
+// jmenuje „Claude Code". Když párování není jednoznačné, panel zůstane na
+// naposledy změněné session — radši známé chování než tipovat.
+
+const CLAUDE_TAB_VIEWTYPE = 'claudeVSCodePanel';
+const CLAUDE_TAB_DEFAULT_TITLE = 'Claude Code';
+const NEW_TAB = Symbol('newTab');
+let _claudeTabLabel = null; // název naposledy aktivního tabu Claude Code
+
+function isClaudeTab(tab) {
+  const input = tab && tab.input;
+  // webview tab má viewType s prefixem (`mainThreadWebview-claudeVSCodePanel`)
+  return !!(input && typeof input.viewType === 'string' && input.viewType.endsWith(CLAUDE_TAB_VIEWTYPE));
+}
+
+// Přepočítá sledovaný tab; vrací true, když se změnil. Aktivní tab v aktivní
+// skupině vyhrává. Když je aktivní něco jiného (soubor), drží se naposledy
+// aktivní tab Claude Code, dokud je otevřený — přepnutí do souboru nemá
+// panel přehodit na jinou session.
+function updateClaudeTab() {
+  const groups = vscode.window.tabGroups;
+  const active = groups.activeTabGroup && groups.activeTabGroup.activeTab;
+  let label = null;
+  if (isClaudeTab(active)) {
+    label = active.label;
+  } else {
+    const open = groups.all.flatMap((g) => g.tabs).filter(isClaudeTab);
+    if (_claudeTabLabel && open.some((t) => t.label === _claudeTabLabel)) label = _claudeTabLabel;
+    else {
+      // sledovaný tab zavřený nebo přejmenovaný → aktivní tab Claude Code jiné skupiny
+      const other = groups.all.map((g) => g.activeTab).find(isClaudeTab);
+      label = other ? other.label : null;
+    }
+  }
+  const changed = label !== _claudeTabLabel;
+  _claudeTabLabel = label;
+  return changed;
+}
+
+function tabTitleMatches(label, title) {
+  if (!title) return false;
+  if (label === title) return true;
+  return label.length > 1 && label.endsWith('…') && title.startsWith(label.slice(0, -1));
+}
+
+// Session k názvu tabu: objekt session, NEW_TAB, nebo null (nevíme).
+function sessionForTab(label, sessions) {
+  if (label === CLAUDE_TAB_DEFAULT_TITLE) {
+    // Tab bez titulku: buď session ještě nemá transcript, nebo ho má, ale
+    // `ai-title` zatím nepřišel. Jediná živá VS Code session bez titulku je
+    // ta druhá možnost; žádná = nová session. Víc = nevíme.
+    const untitled = sessions.filter((s) => s.live && s.vscode && !s.titled);
+    if (untitled.length === 1) return untitled[0];
+    return untitled.length ? null : NEW_TAB;
+  }
+  let m = sessions.filter((s) => tabTitleMatches(label, s.title));
+  if (m.length > 1) m = m.filter((s) => s.live);
+  return m.length === 1 ? m[0] : null;
 }
 
 // ---------- transcript: co je zdroj pravdy a co jeho kopie ----------
@@ -2634,7 +2725,8 @@ function buildModel({ gitLive = false } = {}) {
 
   // SESSIONS: přepínač živých/paralelních session + která je zrovna sledovaná
   const allSessions = projectDir ? listAllSessions(projectDir) : [];
-  const activeSession = projectDir ? activeSessionFile(projectDir) : null;
+  const resolved = projectDir ? resolveActiveSession(projectDir) : { file: null, via: 'latest' };
+  const activeSession = resolved.file;
   const activeSessionId = activeSession ? path.basename(activeSession, '.jsonl') : null;
 
   // PROGRESS
@@ -2799,7 +2891,8 @@ function buildModel({ gitLive = false } = {}) {
     git,
     sessions: sessionList,
     activeSessionId,
-    selectedSessionId: getSelectedSessionId(), // null = auto (nejnovější)
+    sessionVia: resolved.via, // pinned | tab | newTab | latest
+    selectedSessionId: getSelectedSessionId(), // null = auto (tab Claude Code, jinak nejnovější)
     // sekce, které si uživatel trvale schoval (setting) — webview je nevykreslí
     hiddenSections: hidden,
   };
@@ -2906,6 +2999,7 @@ function activate(context) {
   const webview = new ClaudeWebviewProvider(context.extensionUri);
   // git se počítá na pozadí; až doběhne a něco se změnilo, překreslí se panel
   _onGitChange = () => webview.refresh();
+  updateClaudeTab();
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('claudeNotifications', notifications),
@@ -3016,6 +3110,14 @@ function activate(context) {
       invalidateGitCache();
       refreshAll();
     }),
+    // Auto sleduje aktivní tab Claude Code. Překresluje se jen při změně
+    // sledovaného tabu — onDidChangeTabs chodí i kvůli dirty stavu souborů.
+    vscode.window.tabGroups.onDidChangeTabs(() => {
+      if (updateClaudeTab()) refreshAll();
+    }),
+    vscode.window.tabGroups.onDidChangeTabGroups(() => {
+      if (updateClaudeTab()) refreshAll();
+    }),
     vscode.commands.registerCommand('claudePanel.selectSession', async () => {
       const projectDir = projectDirForWorkspace();
       if (!projectDir) {
@@ -3035,7 +3137,7 @@ function activate(context) {
         id: s.id,
       }));
       // volba pro návrat k automatice (nejnovější)
-      picks.push({ label: '$(sync) Auto (latest session)', description: '', id: null });
+      picks.push({ label: '$(sync) Auto', description: 'active Claude Code tab, otherwise latest session', id: null });
       const choice = await vscode.window.showQuickPick(picks, {
         placeHolder: 'Vyber session, kterou sledovat v Progress / Tools / Usage',
       });
