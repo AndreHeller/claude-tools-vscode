@@ -175,6 +175,16 @@ body {
 .ico.codicon {
   font-size: 15px;
 }
+/* Rotace patří glyfu, ne jeho rámečku. Codicon točí celý element, jenže ten
+   má ve skinu `cards` rámeček 24×24 — a ten se pak točí s ním. Animace se
+   proto přesune na `::before`, kde glyf doopravdy je. */
+.ico.codicon-modifier-spin {
+  animation: none;
+}
+.ico.codicon-modifier-spin::before {
+  display: inline-block;
+  animation: codicon-spin 1.5s infinite linear;
+}
 
 /* stav úkolů (barva codicon glyphu přes currentColor) */
 .st-done {
@@ -296,9 +306,13 @@ body {
    se ve výchozím stavu nesmí zúžit pod obsah, takže bez `min-width: 0` zůstane
    na řádek pár pixelů a text se v úzkém panelu láme po písmenech. */
 .agent .ghdr > .row {
-  flex: 1;
-  min-width: 0;
   padding: 0;
+}
+/* Caret drží svoji šířku, ať se zalomený obsah srovná pod sebe. */
+.agent .ghdr > .caret,
+.monitor .ghdr > .caret,
+.server-tile .ghdr > .caret {
+  flex: none;
 }
 
 /* Název drží místo, metadata ustupují. Bez `flex: 1` na názvu si metadata
@@ -384,6 +398,41 @@ body {
   border-radius: 3px;
 }
 
+/* Poslední dvě minuty cache: řádek pulzuje. Vychladnutí stojí reálné peníze
+   (celý kontext se ukládá znovu), takže je to jediné místo v panelu, kde se
+   vyplatí vnutit se do pozornosti. `prefers-reduced-motion` to respektuje. */
+@keyframes cache-pulse {
+  0%, 100% {
+    background: transparent;
+  }
+  50% {
+    background: var(--vscode-inputValidation-errorBackground, rgba(220, 60, 60, 0.25));
+  }
+}
+/* Blikat musí POZADÍ, ne průhlednost textu. Samotné blednutí šedého řádku
+   v panelu splyne s okolím a člověk si ho nevšimne — a tenhle řádek je
+   jediný, u kterého promeškání stojí peníze. */
+.cache-row.cache-blink {
+  animation: cache-pulse 1.1s ease-in-out infinite;
+  font-weight: 600;
+  border-radius: var(--radius);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cache-row.cache-blink {
+    animation: none;
+    text-decoration: underline;
+  }
+}
+
+/* Obsah historie je archiv — ztlumený, aby se na první pohled lišil od toho,
+   co opravdu běží. Bez toho vypadá rozbalená historie jako aktivní seznam. */
+.activity-hist {
+  opacity: 0.72;
+}
+.activity-hist .subsection-hdr .lbl {
+  font-weight: normal;
+}
+
 /* ---------- Usage: součty za session ---------- */
 .usage-sum-hdr {
   margin: 6px 8px 2px;
@@ -444,10 +493,80 @@ body {
   opacity: 0.85;
 }
 /* Žádné odsazení obsahu: v úzkém panelu je každý pixel šířky znát a hierarchii
-   dostatečně nese tišší hlavička skupiny. Zanořovalo by se to navíc dvakrát —
-   sekce i skupina. */
-.subsection > .gbody {
+   dostatečně nese tišší hlavička skupiny. Bez tohohle se odsazení SČÍTÁ —
+   skupina 25 px, dlaždice v ní dalších 25 px — a na text zbyde polovina
+   šířky. Selektor musí přebít `body.skin-cards .gbody` níž, odtud ta váha. */
+.subsection > .gbody,
+body.skin-cards .subsection > .gbody,
+body.skin-cards .activity .gbody,
+body.skin-cards .monitor > .group > .gbody,
+body.skin-cards .agent > .group > .gbody,
+body.skin-cards .server-tile > .group > .gbody {
   padding-left: 0;
+}
+
+/* Název vs. metadata v hlavičce dlaždice.
+   Metadata („12 min · vyprší za 18 min“) jsou doplněk, název říká, o co jde —
+   ale ve flex řádku si metadata ukrojí, kolik potřebují, a z názvu zbydou tři
+   tečky. V úzkém panelu proto hlavička zalomí a metadata jdou pod název. */
+.monitor .ghdr,
+.agent .ghdr,
+.server-tile .ghdr {
+  flex-wrap: wrap;
+}
+/* Řádek s názvem a „právě dělá" pod ním jsou obě položky zalamovací hlavičky.
+   Bez `flex-basis: 100%` si je flex rozdělí vedle sebe a dlouhá živá akce
+   („▸ Sources read: https://…") vytlačí název na nulovou šířku — dlaždice pak
+   ukazuje jen akci a jméno agenta zmizí. */
+/* Řádek s názvem vyplní zbytek šířky VEDLE caretu — `flex-basis: 100%` by ho
+   zalomil pod něj a šipka by zůstala na prázdném řádku nad dlaždicí. */
+/* Nulový základ ze stejného důvodu jako u názvu níž: s `auto` se řádek
+   nafoukne podle obsahu, přeteče šířku a zalomí se pod šipku, která pak
+   zůstane sama na prázdném řádku nad dlaždicí. */
+.agent .ghdr > .row,
+.monitor .ghdr > .row,
+.server-tile .ghdr > .row {
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* Živá akce je naopak celý vlastní řádek, jinak si ukrojí místo názvu. */
+.agent-action {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+/* Základ 0, ne `auto`: s `auto` se základ počítá podle obsahu, takže dlouhý
+   název přeteče dostupnou šířku a zalomí se CELÝ na další řádek — ikona
+   a šipka pak zůstanou osamocené nahoře. S nulovým základem se místo toho
+   zkrátí třemi tečkami, jak má. */
+.monitor .ghdr .lbl,
+.agent .ghdr .lbl,
+.server-tile .ghdr .lbl {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Tlačítka (port, zastavit) drží svou šířku a zůstávají na prvním řádku —
+   jinak je zalamovací hlavička odsune pod text. */
+.monitor .ghdr > button,
+.agent .ghdr > button,
+.server-tile .ghdr > button,
+.server-tile .ghdr .server-open,
+.server-tile .ghdr .monitor-kill,
+.monitor .ghdr .monitor-kill {
+  flex: none;
+  order: 5;
+}
+@media (max-width: 420px) {
+  .monitor .ghdr .meta,
+  .agent .ghdr .meta,
+  .server-tile .ghdr .meta {
+    flex-basis: 100%;
+    max-width: 100%;
+    margin-left: 25px; /* pod text, ne pod caret */
+    order: 10;         /* až za tlačítka, aby zůstala vpravo nahoře */
+  }
 }
 .subsection + .subsection {
   margin-top: 2px;
@@ -548,9 +667,12 @@ body {
   margin-left: 4px;
 }
 /* Popis musí dostat zbylé místo. Bez toho ho `meta` (flex:none) smrskne na nulu
-   a z dlaždice zbude jen ikona s údaji — hlídač pak nejde poznat. */
+   a z dlaždice zbude jen ikona s údaji — hlídač pak nejde poznat.
+   Základ 0 ze stejného důvodu jako výš: s `auto` by se dlouhý název zalomil
+   celý na další řádek místo zkrácení. Tohle pravidlo stojí za tamtím, takže
+   by ho jinak přebilo. */
 .monitor .ghdr .lbl {
-  flex: 1 1 auto;
+  flex: 1 1 0;
 }
 /* z které session hlídač je — vlastní řádek, titulky session bývají dlouhé */
 .monitor-src {
@@ -725,6 +847,13 @@ body.skin-cards .ghdr {
 body.skin-cards .row .lbl {
   white-space: normal;
   line-height: 1.35;
+}
+/* V dlaždicích Activity ale ne — tam se název zkracuje, aby zůstal na řádku
+   s ikonou a nevytlačil tlačítka. */
+body.skin-cards .agent .row .lbl,
+body.skin-cards .monitor .row .lbl,
+body.skin-cards .server-tile .row .lbl {
+  white-space: nowrap;
 }
 /* jednotná šířka ikon → zarovnané sloupce (i bez rámečku, např. MCP tooly) */
 body.skin-cards .ico {

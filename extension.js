@@ -899,10 +899,10 @@ function readSessionAgents(sessionFile, includeActions) {
       // Session skončila dřív, než výsledek dorazil — agent tedy neběží, ale ani
       // nedoběhl. Tvrdit „hotovo" by bylo stejně nepravdivé jako „běží".
       status = 'stopped';
-      summary = 'session skončila dřív, než dorazil výsledek';
+      summary = 'session ended before the result arrived';
     } else if (m.foreground && !turnRunning) {
       status = 'stopped';
-      summary = 'nedoběhl — výsledek do konverzace nedorazil';
+      summary = 'did not finish — no result reached the conversation';
     }
     agents.push({
       id: tuid,
@@ -1065,7 +1065,7 @@ function ukonciStrom(pid, pgid, port) {
       }
     }
   }
-  if (!doruceno) throw new Error('žádný z procesů už neběžel');
+  if (!doruceno) throw new Error('none of the processes were still running');
 }
 
 // Port ze zadání. Používá se, když proces neběží nebo `lsof` nic nevrátil —
@@ -1217,8 +1217,11 @@ function readSessionServers(sessionFile) {
       }
     }
     if (port == null) port = portFromCommand(z.command);
-    if (port == null) continue; // bez portu to není server, jen úloha na pozadí
+    // Bez portu to není server, ale pořád je to něco, co běží na pozadí —
+    // čekací smyčka, dávka, build. Vrací se taky, jen jako `kind: 'background'`;
+    // panel je dá do vlastní skupiny, kde nelže tlačítkem na otevření portu.
     out.push({
+      kind: port == null ? 'background' : 'server',
       id: z.taskId || (proc ? String(proc.pid) : 'x' + i),
       status: proc ? 'running' : 'stopped',
       pid: proc ? proc.pid : null,
@@ -2258,7 +2261,7 @@ class PlansProvider extends BaseProvider {
       const item = new vscode.TreeItem(p.title, vscode.TreeItemCollapsibleState.None);
       item.description = path.basename(p.file);
       item.iconPath = new vscode.ThemeIcon('notebook');
-      item.command = { command: 'claudePanel.openFile', title: 'Otevřít', arguments: [p.file] };
+      item.command = { command: 'claudePanel.openFile', title: 'Open', arguments: [p.file] };
       item.contextValue = 'deletableFile';
       item.filePath = p.file;
       item.kind = 'plan';
@@ -2479,16 +2482,20 @@ function buildModel() {
   // SERVERS: dev servery spuštěné na pozadí. Jako Monitors se sbírají ze všech
   // živých session projektu — server běží dál, i když jsi přepnutý jinam.
   const servers = [];
+  const backgrounds = [];
   for (const s of allSessions) {
     const alive = liveMap ? liveMap.has(s.id) : s.live;
-    // Běžící servery mají jen živé session; u sledované se čte i historie,
-    // aby skupina nezmizela, jakmile poslední server doběhne.
+    // Běžící mají jen živé session; u sledované se čte i historie, aby skupina
+    // nezmizela, jakmile poslední úloha doběhne.
     if (!alive && s.id !== activeSessionId) continue;
     for (const sv of readSessionServers(s.file)) {
-      servers.push({ ...sv, session: s.id === activeSessionId ? null : s.title });
+      const polozka = { ...sv, session: s.id === activeSessionId ? null : s.title };
+      (sv.kind === 'background' ? backgrounds : servers).push(polozka);
     }
   }
-  servers.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  const dleStartu = (a, b) => (b.startedAt || 0) - (a.startedAt || 0);
+  servers.sort(dleStartu);
+  backgrounds.sort(dleStartu);
 
   // NOTIFICATIONS: hlášky hooků (systemMessage) aktivní session, bez zavřených
   const notifications = (activeSession ? visibleNotifications(activeSession) : []).map((n) => ({
@@ -2583,6 +2590,7 @@ function buildModel() {
     agents,
     monitors,
     servers,
+    backgrounds,
     notifications,
     usage,
     sessions: sessionList,
@@ -2814,7 +2822,7 @@ function activate(context) {
         id: s.id,
       }));
       // volba pro návrat k automatice (nejnovější)
-      picks.push({ label: '$(sync) Auto (nejnovější session)', description: '', id: null });
+      picks.push({ label: '$(sync) Auto (latest session)', description: '', id: null });
       const choice = await vscode.window.showQuickPick(picks, {
         placeHolder: 'Vyber session, kterou sledovat v Progress / Tools / Usage',
       });
@@ -2865,16 +2873,16 @@ function activate(context) {
         'PID ' + arg.pid +
         (arg.command ? '\n\n' + String(arg.command).slice(0, 400) : '');
       const choice = await vscode.window.showWarningMessage(
-        arg.kind === 'server' ? 'Zastavit server?' : 'Zastavit hlídač?',
+        arg.kind === 'server' ? 'Stop server?' : 'Stop monitor?',
         { modal: true, detail },
-        'Zastavit'
+        'Stop'
       );
-      if (choice !== 'Zastavit') return;
+      if (choice !== 'Stop') return;
       try {
         ukonciStrom(arg.pid, arg.pgid, arg.port || null);
       } catch (e) {
-        const co = arg.kind === 'server' ? 'Server' : 'Hlídač';
-        vscode.window.showErrorMessage(`${co} se nepodařilo zastavit: ${e.message}`);
+        const co = arg.kind === 'server' ? 'Server' : 'Monitor';
+        vscode.window.showErrorMessage(`Could not stop ${co.toLowerCase()}: ${e.message}`);
         return;
       }
       invalidateProcessCache();

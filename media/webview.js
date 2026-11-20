@@ -14,7 +14,8 @@
   // verze se nový klíč do `collapsed` nikdy nedostane a archiv by zůstal otevřený.
   const DEFAULT_CLOSED = new Set(['t:monitors:hist']);
   const isDefaultClosed = (key) =>
-    DEFAULT_CLOSED.has(key) || key.startsWith('t:monitor:') || key.startsWith('a:') || key.startsWith('sv:') || key === 'usage:help';
+    DEFAULT_CLOSED.has(key) || key.startsWith('t:monitor:') || key.startsWith('a:') || key.startsWith('sv:') || key === 'usage:help' ||
+    key === 'act:hist' || key.startsWith('hist:');
   const opened = new Set(saved && saved.opened ? saved.opened : []);
   if (saved && saved.seeded) seeded = true;
 
@@ -141,7 +142,7 @@
       '<div class="session-picker">' +
       '<span class="sp-label codicon codicon-comment-discussion"></span>' +
       '<select class="sp-select" id="sessionSelect">' +
-      '<option value="__auto__"' + autoSel + '>↻ Auto (nejnovější)</option>' +
+      '<option value="__auto__"' + autoSel + '>↻ Auto (latest)</option>' +
       opts +
       '</select>' +
       '</div>'
@@ -339,14 +340,13 @@
     return z ? m + ' m ' + z + ' s' : m + ' m';
   }
 
-  function renderAgents() {
-    const list = model.agents || [];
-    if (!list.length) return '<div class="empty-hint">No subagents in this session.</div>';
+  // Jedna dlaždice agenta. Dělení na běžící a archiv řeší Activity, ať je
+  // na jednom místě pro všechny druhy stejně.
+  function agentTile(a) {
     const st = {
       running: { ico: 'loading codicon-modifier-spin', cls: 'agent-running' },
       done: { ico: 'pass-filled', cls: 'agent-done' },
     };
-    const dlazdice = (a) => {
         const s = st[a.status] || { ico: 'error', cls: 'agent-failed' };
         const title = esc(a.name + (a.model ? ' · ' + a.model : '') + (a.summary ? '\n' + a.summary : ''));
         const label = esc(a.description || a.name);
@@ -378,16 +378,6 @@
           ? group('a:' + a.id, hdr, detail)
           : hdr;
         return '<div class="agent ' + s.cls + '" title="' + title + '">' + body + '</div>';
-    };
-    const html = zivePlusHistorie(
-      list.filter((a) => a.status === 'running'),
-      list.filter((a) => a.status !== 'running'),
-      dlazdice,
-      'a:agents:hist',
-      'Právě nic neběží.'
-    );
-    // wrapper → v širokém panelu z něj CSS udělá grid dlaždic (viz @media)
-    return '<div class="agent-list">' + html + '</div>';
   }
 
   // Prompt cache: odpočet jen v posledních CACHE_WARN_MIN minutách a jen když by
@@ -410,7 +400,13 @@
     // texty krátké — sidebar bývá úzký; cena je celá v tooltipu
     if (left <= 0) {
       text = isPricey ? 'cold · next ' + cost : 'cold';
-      if (isPricey) cls = ' crit';
+      cls = ' crit';
+    } else if (left <= 120000) {
+      // Poslední dvě minuty po vteřinách: tady se rozhoduje, jestli se vyplatí
+      // zprávu doklepat teď, nebo je stejně pozdě.
+      const s = Math.ceil(left / 1000);
+      text = 'expires in ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+      cls = ' crit cache-blink';
     } else if (isPricey && mins <= CACHE_WARN_MIN) {
       text = 'expires in ' + mins + ' min';
       cls = mins <= 5 ? ' crit' : ' warn';
@@ -439,7 +435,11 @@
     const row = tmp.firstElementChild;
     el.className = row.className;
     el.querySelector('.meta').textContent = row.querySelector('.meta').textContent;
-  }, 30000);
+    // Tik po vteřině, ne po půlminutě: s třicetivteřinovým krokem to vypadalo,
+      // že se odpočet nehýbe vůbec, a v posledních minutách je vteřina ten
+      // rozdíl, podle kterého se člověk rozhoduje. Přepisuje se jen text
+      // a třída, takže je to levné i při vteřinovém kroku.
+  }, 1000);
 
   function renderUsage() {
     const u = model.usage;
@@ -456,16 +456,16 @@
       (u.cache ? cacheRow(u.cache, Date.now()) : '') +
       // Součty za session stojí pod stavem kontextu a měří něco jiného, takže
       // dostaly vlastní nadpis — jinak to vypadá jako čtyři varianty téhož.
-      '<div class="usage-sum-hdr">Za celou session</div>' +
+      '<div class="usage-sum-hdr">Whole session</div>' +
       // Nálepka nese NÁSOBEK základní sazby, ne slovo „levné / drahé" — to
       // neříká vůči čemu. Čísla jdou porovnat mezi sebou na první pohled.
-      usageRow('arrow-up', 'Claude napsal', u.outputTotal, '') +
-      usageRow('database', 'Přečteno z cache', u.cacheReadTotal, '0,1×') +
+      usageRow('arrow-up', 'Claude wrote', u.outputTotal, '') +
+      usageRow('database', 'Read from cache', u.cacheReadTotal, '0,1×') +
       // Násobek závisí na TTL cache: pětiminutová stojí 1,25×, hodinová 2×.
       // Natvrdo napsaná hodnota lhala každému, kdo jede s 1h cache.
-      usageRow('save', 'Uloženo do cache', u.cacheWriteTotal,
+      usageRow('save', 'Written to cache', u.cacheWriteTotal,
         u.cache && u.cache.ttl === '1h' ? '2×' : '1,25×') +
-      usageRow('arrow-down', 'Mimo cache', u.inputTotal, '1×') +
+      usageRow('arrow-down', 'Outside cache', u.inputTotal, '1×') +
       usageLegenda()
     );
   }
@@ -489,20 +489,22 @@
   function usageLegenda() {
     const body =
       '<div class="usage-help">' +
-      '<p>Claude <b>nemá paměť mezi zprávami</b>. Při každém dotazu se mu posílá celá ' +
-      'konverzace znovu, takže se čísla nasčítají do milionů, i když konverzace sama je zlomek.</p>' +
-      '<p><b>Přečteno z cache</b> je ta část, kterou už jednou zpracoval a jen na ni naváže — ' +
-      'desetina ceny. Proto je to číslo obrovské a stojí skoro nic.</p>' +
-      '<p><b>Uloženo do cache</b> je uložení konverzace, aby se příště četla levně. Stojí o čtvrtinu ' +
-      'víc než běžné zpracování, ale vrátí se to hned další zprávou. <b>Vyskočí, když cache ' +
-      'vychladne</b> a celý kontext se musí uložit znovu.</p>' +
-      '<p><b>Mimo cache</b> jsou tokeny, které se do cache nevešly — v praxi hlavně tvoje poslední ' +
-      'zpráva. Plná sazba, ale je jich málo.</p>' +
-      '<p class="usage-help-note">Násobky jsou vůči základní sazbě za vstup. Výstup se účtuje zvlášť a dráž.</p>' +
+      '<p>Claude <b>has no memory between messages</b>. Every message re-sends the whole ' +
+      'conversation, so the totals climb into the millions even though the conversation itself ' +
+      'is a fraction of that.</p>' +
+      '<p><b>Read from cache</b> is the part it already processed and only picks up again — ' +
+      'a tenth of the price. That is why the number is huge and costs almost nothing.</p>' +
+      '<p><b>Written to cache</b> stores the conversation so the next read is cheap. It costs ' +
+      'a quarter more than plain processing, but pays for itself with the very next message. ' +
+      '<b>It jumps whenever the cache goes cold</b> and the whole context has to be stored again.</p>' +
+      '<p><b>Outside cache</b> are tokens that did not fit the cache — in practice mostly your ' +
+      'latest message. Full rate, but there are few of them.</p>' +
+      '<p class="usage-help-note">Multipliers are relative to the base input rate. Output is ' +
+      'billed separately and costs more.</p>' +
       '</div>';
     const hdr =
       '<span class="ico codicon codicon-question"></span>' +
-      '<span class="lbl">Co ta čísla znamenají</span>';
+      '<span class="lbl">What these numbers mean</span>';
     return group('usage:help', hdr, body);
   }
 
@@ -524,7 +526,7 @@
   function fmtDur(ms) {
     if (!ms || ms < 0) return '';
     const min = Math.round(ms / 60000);
-    if (min < 1) return 'míň než min';
+    if (min < 1) return 'under a min';
     if (min < 60) return min + ' min';
     const h = Math.floor(min / 60);
     const rest = min % 60;
@@ -541,17 +543,17 @@
     if (t.status === 'running' && t.startedAt) head.push(fmtDur(now - t.startedAt));
     if (t.events.length) head.push(t.events.length + '×');
     if (t.status === 'running') {
-      if (t.expiresAt) head.push(t.expiresAt > now ? 'vyprší za ' + fmtDur(t.expiresAt - now) : 'vyprší');
-      else if (t.persistent) head.push('do konce session');
+      if (t.expiresAt) head.push(t.expiresAt > now ? 'expires in ' + fmtDur(t.expiresAt - now) : 'expired');
+      else if (t.persistent) head.push('until session ends');
     }
     // podrobnosti dovnitř, ať hlavička zůstane krátká
     const sub = [];
-    if (t.interval) sub.push('á ' + t.interval + 's');
+    if (t.interval) sub.push('every ' + t.interval + 's');
     if (t.session) sub.push('↗ ' + t.session);
     const subLine = sub.length ? '<div class="monitor-src">' + esc(sub.join(' · ')) + '</div>' : '';
     const shown = t.events.slice(-TASK_EVENTS_SHOWN);
     const hidden = t.events.length - shown.length;
-    const more = hidden > 0 ? '<div class="monitor-more">+ ' + hidden + ' starších</div>' : '';
+    const more = hidden > 0 ? '<div class="monitor-more">+ ' + hidden + ' older</div>' : '';
     const timeline = t.events.length
       ? '<div class="monitor-events">' +
         more +
@@ -566,12 +568,12 @@
           )
           .join('') +
         '</div>'
-      : '<div class="monitor-events monitor-quiet">zatím nic nehlásil</div>';
+      : '<div class="monitor-events monitor-quiet">nothing reported yet</div>';
     // Zastavit jde jen hlídač, jehož proces se podařilo najít — bez PID by
     // tlačítko nemělo co zabít.
     const kill =
       t.status === 'running' && t.pid
-        ? '<button class="monitor-kill" title="Zastavit hlídač" data-kill="' + esc(t.pid) + '"' +
+        ? '<button class="monitor-kill" title="Stop monitor" data-kill="' + esc(t.pid) + '"' +
           ' data-kill-pgid="' + esc(t.pgid || '') + '"' +
           ' data-kill-desc="' + esc(t.description) + '"' +
           ' data-kill-cmd="' + esc(String(t.procCommand || '').slice(0, 400)) + '">' +
@@ -589,32 +591,37 @@
   // bez tepu jsou pod sbalenou historií, jinak se to, co běží, ztratí v archivu.
   // Dev servery běžící na pozadí. Ukazují se jen ty živé — server, který
   // doběhl, není k čemu otevřít, takže by v panelu jen překážel.
-  function renderServers() {
-    const list = model.servers || [];
-    if (!list.length) return '';
+  // Jedna dlaždice serveru nebo background úlohy. Úloha bez portu nemá co
+  // otevřít, takže jí tlačítko s portem chybí — jinak je to totéž.
+  function serverTile(s) {
     const now = Date.now();
-    const dlazdice = (s) => {
           const url = 'http://localhost:' + s.port;
           const head = [];
           // U doběhlého serveru by minuty rostly dál do teď — vypadalo to,
           // jako by pořád běžel.
-          if (s.status !== 'stopped' && s.startedAt) head.push('běží ' + fmtDur(now - s.startedAt));
+          if (s.status !== 'stopped' && s.startedAt) head.push('up ' + fmtDur(now - s.startedAt));
           // Odkud se port vzal, se nezamlčuje: změřený je doklad, že se
           // opravdu poslouchá, kdežto vyčtený ze zadání je jen tvrzení příkazu.
-          if (!s.measured) head.push('port ze zadání');
+          // Jen u serveru: „ze zadání" dává smysl proti „změřeno přes lsof".
+          // Background úloha port nemá vůbec, tvrdit o něm cokoli je nesmysl.
+          if (s.port != null && !s.measured) head.push('port from command');
           if (s.session) head.push('↗ ' + s.session);
           const hdr =
-            '<span class="ico codicon codicon-globe"></span>' +
+            '<span class="ico codicon codicon-' + (s.port == null ? 'server-process' : 'globe') + '"></span>' +
             '<span class="lbl">' + esc(s.description || s.command.slice(0, 60)) + '</span>' +
             (head.length ? '<span class="meta">' + esc(head.join(' · ')) + '</span>' : '') +
             // Doběhlý server není k čemu otevřít ani co zastavit — port
             // zůstává jen jako informace, čím běžel.
-            (s.status === 'stopped'
-              ? '<span class="meta server-port-off">' + esc(':' + s.port) + '</span>'
-              : '<button class="server-open" data-url="' + esc(url) + '" title="' + esc(url) + '">' +
-                esc(':' + s.port) + '</button>') +
+            // Úloha bez portu nemá co otevřít; doběhlý server má port už jen
+            // jako informaci, čím běžel.
+            (s.port == null
+              ? ''
+              : s.status === 'stopped'
+                ? '<span class="meta server-port-off">' + esc(':' + s.port) + '</span>'
+                : '<button class="server-open" data-url="' + esc(url) + '" title="' + esc(url) + '">' +
+                  esc(':' + s.port) + '</button>') +
             (s.status === 'stopped' ? '' :
-            '<button class="monitor-kill" title="Zastavit server" data-kill="' + esc(s.pid) + '"' +
+            '<button class="monitor-kill" title="Stop server" data-kill="' + esc(s.pid) + '"' +
             ' data-kill-kind="server"' +
             ' data-kill-port="' + esc(s.port) + '"' +
             ' data-kill-pgid="' + esc(s.pgid || '') + '"' +
@@ -626,50 +633,25 @@
           const telo = '<div class="server-cmd">' + esc(s.command) + '</div>';
           return '<div class="server-tile server-' + esc(s.status || 'running') + '">' +
                  group('sv:' + s.id, hdr, telo) + '</div>';
-    };
-    const html = zivePlusHistorie(
-      list.filter((s) => s.status !== 'stopped'),
-      list.filter((s) => s.status === 'stopped'),
-      dlazdice,
-      'sv:servers:hist',
-      'Právě nic neběží.'
-    );
-    return '<div class="server-list">' + html + '</div>';
   }
 
-  // Tvar, který drží všechny tři skupiny v Activity: nahoře to, co běží,
-  // zbytek pod sbalenou Historií. Bez toho se každá chovala jinak — agenti
-  // měli doběhlé rovnou v seznamu, hlídači historii zvlášť a servery po
-  // doběhnutí zmizely celé.
-  function zivePlusHistorie(live, past, dlazdice, klicHistorie, prazdne) {
-    let html = live.length
-      ? live.map(dlazdice).join('')
-      : '<div class="empty-hint">' + esc(prazdne) + '</div>';
-    if (past.length) {
-      const hdr =
-        '<span class="ico codicon codicon-history"></span><span class="lbl">Historie</span>' +
-        '<span class="meta">' + past.length + '</span>';
-      html += group(klicHistorie, hdr, past.map(dlazdice).join(''));
-    }
-    return html;
-  }
 
-  function renderMonitors() {
-    const list = model.monitors || [];
-    const st = {
+  // Jedna dlaždice hlídače (stav si odvodí sama).
+  function monitorTileDefault(m) {
+    return monitorTile(m, {
       running: { ico: 'pulse', cls: 'monitor-running' },
       stopped: { ico: 'debug-stop', cls: 'monitor-stopped' },
       expired: { ico: 'watch', cls: 'monitor-over' },
       ended: { ico: 'circle-slash', cls: 'monitor-over' },
-    };
-    const html = zivePlusHistorie(
-      list.filter((t) => t.status === 'running'),
-      list.filter((t) => t.status !== 'running'),
-      (t) => monitorTile(t, st),
-      't:monitors:hist',
-      'Právě nic nehlídá.'
-    );
-    return '<div class="monitor-list">' + html + '</div>';
+    });
+  }
+
+  // Dlaždice podle druhu. Jedno místo, kde se rozhoduje, co čím vykreslit.
+  function dlazdiceDruhu(klic, seznam) {
+    const tile =
+      klic === 'agents' ? agentTile : klic === 'monitors' ? monitorTileDefault : serverTile;
+    const wrap = klic === 'agents' ? 'agent-list' : klic === 'monitors' ? 'monitor-list' : 'server-list';
+    return '<div class="' + wrap + '">' + seznam.map(tile).join('') + '</div>';
   }
 
   // `actions` je hotové HTML tlačítek vpravo v hlavičce. Leží uvnitř prvku
@@ -752,6 +734,7 @@
     const agents = model.agents || [];
     const monitors = model.monitors || [];
     const servers = model.servers || [];
+    const backgrounds = model.backgrounds || [];
     // sekce, které si uživatel trvale schoval přes setting claudeTools.hiddenSections
     const hidden = new Set(model.hiddenSections || []);
     const secs = [];
@@ -768,31 +751,44 @@
     if (!hidden.has('progress')) secs.push(section('To Do Progress', 'sec:progress', renderProgress(), pMeta));
     if (!hidden.has('history')) secs.push(section('To Do History', 'sec:history', renderHistory()));
     if (!hidden.has('tools')) secs.push(section('Tools', 'sec:tools', renderTools()));
-    // Activity: jedna sekce na otázku „co mi teď běží na pozadí". Uvnitř zůstávají
-    // tři skupiny, protože odpovídají na různé druhotné otázky — agent se ptá
-    // „s čím se vrátil", hlídač „co ohlásil", server „kam se kliknu". Skupina
-    // bez obsahu se nevykreslí, takže nic nezabírá místo nadarmo.
-    const skupiny = [];
-    // V hlavičce skupiny stojí jen to, co běží. Doběhlé položky mají vlastní
-    // počet u řádku Historie, takže by se tu počítaly podruhé — a hlavně by
-    // hlavička tvrdila „3 running" nad seznamem, kde neběží nic.
-    const bezicichAgentu = agents.filter((a) => a.status === 'running').length;
-    const bezicichMonitoru = monitors.filter((m) => m.status === 'running').length;
-    const bezicichServeru = servers.filter((s) => s.status !== 'stopped').length;
-    const meta = (n) => (n ? n + ' running' : '');
-    if (!hidden.has('agents') && agents.length) {
-      skupiny.push(subSection('Agents', 'sec:agents', renderAgents(), meta(bezicichAgentu)));
+    // Activity odpovídá na otázku „co mi teď běží". Nahoře proto stojí JEN to,
+    // co běží, rozdělené podle druhu; doběhlé jde všechno do jedné společné
+    // Historie, uvnitř rozpadlé podle téhož dělení. Dřív měla historii každá
+    // skupina zvlášť a nad prázdným panelem z toho byla šestice řádků, které
+    // říkaly jen to, že se nic neděje.
+    const druhy = [
+      { klic: 'agents', nazev: 'Agents', vse: agents, bezi: (x) => x.status === 'running' },
+      { klic: 'monitors', nazev: 'Monitors', vse: monitors, bezi: (x) => x.status === 'running' },
+      { klic: 'servers', nazev: 'Servers', vse: servers, bezi: (x) => x.status !== 'stopped' },
+      { klic: 'backgrounds', nazev: 'Background', vse: backgrounds, bezi: (x) => x.status !== 'stopped' },
+    ].filter((d) => !hidden.has(d.klic) && d.vse.length);
+
+    const zive = [];
+    const archiv = [];
+    let beziCelkem = 0;
+    let vArchivu = 0;
+    for (const d of druhy) {
+      const b = d.vse.filter(d.bezi);
+      const minule = d.vse.filter((x) => !d.bezi(x));
+      beziCelkem += b.length;
+      vArchivu += minule.length;
+      if (b.length) {
+        zive.push(subSection(d.nazev, 'sec:' + d.klic, dlazdiceDruhu(d.klic, b), String(b.length)));
+      }
+      if (minule.length) {
+        archiv.push(subSection(d.nazev, 'hist:' + d.klic, dlazdiceDruhu(d.klic, minule), String(minule.length)));
+      }
     }
-    if (!hidden.has('monitors') && monitors.length) {
-      skupiny.push(subSection('Monitors', 'sec:monitors', renderMonitors(), meta(bezicichMonitoru)));
-    }
-    if (!hidden.has('servers') && servers.length) {
-      skupiny.push(subSection('Servers', 'sec:servers', renderServers(), meta(bezicichServeru)));
-    }
-    if (skupiny.length) {
-      const beziCelkem = bezicichAgentu + bezicichMonitoru + bezicichServeru;
+    if (zive.length || archiv.length) {
+      let telo = zive.length ? zive.join('') : '<div class="empty-hint">Nothing running right now.</div>';
+      if (archiv.length) {
+        const hdr =
+          '<span class="ico codicon codicon-history"></span><span class="lbl">History</span>' +
+          '<span class="meta">' + vArchivu + '</span>';
+        telo += group('act:hist', hdr, '<div class="activity activity-hist">' + archiv.join('') + '</div>');
+      }
       secs.push(
-        section('Activity', 'sec:activity', '<div class="activity">' + skupiny.join('') + '</div>',
+        section('Activity', 'sec:activity', '<div class="activity">' + telo + '</div>',
           beziCelkem ? beziCelkem + ' running' : '')
       );
     }
